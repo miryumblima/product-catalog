@@ -2576,8 +2576,8 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
   });
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-start justify-center z-50 overflow-y-auto py-6 px-4">
-      <div className="bg-white rounded-2xl w-full max-w-5xl my-auto flex flex-col overflow-hidden" style={{ maxHeight: "92vh" }}>
+    <div className="fixed inset-0 bg-black/30 flex items-start justify-center z-50 overflow-y-auto py-3 px-4">
+      <div className="bg-white rounded-2xl w-full max-w-5xl my-auto flex flex-col overflow-hidden" style={{ maxHeight: "96vh" }}>
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-[#EAE5D9] shrink-0">
@@ -4489,6 +4489,11 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
   ];
 
   const filteredLibrary = mediaIndex.filter((m) => {
+    // Scoped to THIS product only — either explicitly assigned to it, or
+    // already attached as one of its own images. The global Media Library
+    // (a separate modal) still shows everything, unfiltered by product.
+    const belongsToThisProduct = m.assignedProductId === draft.id || (draft.images || []).includes(m.id);
+    if (!belongsToThisProduct) return false;
     if (filterType && m.type !== filterType) return false;
     if (filterSource && m.source !== filterSource) return false;
     if (filterDate) {
