@@ -403,16 +403,18 @@ function ProductCatalogApp() {
           const parsedIndex = JSON.parse(idx.value);
           setMediaIndex(parsedIndex);
           const uploadedItems = parsedIndex.filter((m) => !m.url);
-          const blobResults = await Promise.all(
-            uploadedItems.map(async (m) => {
-              try {
-                const b = await window.storage.get("media-blob:" + m.id, false);
-                return [m.id, b && b.value ? JSON.parse(b.value).url : null];
-              } catch (e) {
-                return [m.id, null];
-              }
-            })
-          );
+          // Batched, not all-at-once — fetching every media blob in parallel
+          // (one request per item) hits Supabase's rate limit once there are
+          // more than a handful of items, silently dropping some of them and
+          // leaving those media items with no image at all.
+          const blobResults = await runBatched(uploadedItems, async (m) => {
+            try {
+              const b = await window.storage.get("media-blob:" + m.id, false);
+              return [m.id, b && b.value ? JSON.parse(b.value).url : null];
+            } catch (e) {
+              return [m.id, null];
+            }
+          });
           const blobMap = {};
           blobResults.forEach(([id, url]) => { if (url) blobMap[id] = url; });
           setMediaBlobs(blobMap);
@@ -435,13 +437,14 @@ function ProductCatalogApp() {
           if (kept.length !== parsed.length) {
             window.storage?.set("aster-media-trash-v1", JSON.stringify(kept), false).catch(() => {});
           }
-          // Load blob data for kept entries
-          const withBlobs = await Promise.all(kept.map(async (t) => {
+          // Load blob data for kept entries — batched, not all-at-once, for
+          // the same reason as the main media blob load above.
+          const withBlobs = await runBatched(kept, async (t) => {
             try {
               const b = await window.storage.get("media-trash-blob:" + t.id, false);
               return { ...t, blobUrl: b?.value ? JSON.parse(b.value).url : null };
             } catch (e) { return { ...t, blobUrl: null }; }
-          }));
+          });
           setMediaTrash(withBlobs);
         }
       } catch (e) {}
