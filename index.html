@@ -4439,9 +4439,31 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
   const [printTitle, setPrintTitle] = useState("Bulk Edit");
   const [confirmedPrintTitle, setConfirmedPrintTitle] = useState("");
   const [confirmedPrintTimestamp, setConfirmedPrintTimestamp] = useState(false);
+  const [selectedRowIds, setSelectedRowIds] = useState(new Set());
 
+  // Fields that make sense to bulk-fill across selected rows — Name is
+  // deliberately excluded, since product names should stay unique.
+  const BULK_FILL_FIELDS = ["brand", "category", "description", "wholesale", "retail", "defaultQty", "qtyOnHand"];
+
+  const toggleRowSelected = (rowId) => {
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev);
+      next.has(rowId) ? next.delete(rowId) : next.add(rowId);
+      return next;
+    });
+  };
+
+  // Editing a field on a row that's part of a multi-selection applies that
+  // same value to every other selected row too — e.g. select 4 products,
+  // set Brand on one, and it fills in for all 4 at once.
   const updateRow = (rowId, field, value) => {
-    setRows((prev) => prev.map((r) => (r.rowId === rowId ? { ...r, [field]: value } : r)));
+    const isBulkFillField = BULK_FILL_FIELDS.includes(field);
+    const shouldPropagate = isBulkFillField && selectedRowIds.has(rowId) && selectedRowIds.size > 1;
+    setRows((prev) => prev.map((r) => {
+      if (r.rowId === rowId) return { ...r, [field]: value };
+      if (shouldPropagate && selectedRowIds.has(r.rowId)) return { ...r, [field]: value };
+      return r;
+    }));
   };
   const removeRow = (rowId) => setRows((prev) => prev.filter((r) => r.rowId !== rowId));
   const addMoreRows = (n) => setRows((prev) => [...prev, ...Array.from({ length: n }, blankRow)]);
@@ -4513,7 +4535,7 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
     setTimeout(() => setSavedFlash(false), 2000);
   };
 
-  const colTemplate = "1.2fr 0.9fr 0.9fr 1.3fr 70px 70px 70px 70px 28px";
+  const colTemplate = "24px 1.2fr 0.9fr 0.9fr 1.3fr 70px 70px 70px 70px 28px";
 
   const openPrintPrompt = () => setPrintPromptOpen(true);
   const confirmPrint = () => {
@@ -4600,16 +4622,31 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
           <p className="text-[11px] text-[#8A8377] mb-3">
             Only basic fields are editable here. New rows (blank, at the bottom) become new products when saved; existing rows update in place.
             Sizes/shades, media, ingredients, and Shopify details still need the regular product editor.
+            {" "}Check multiple rows, then edit a field (other than Name) on any one of them — that value fills in for every checked row at once.
+            {selectedRowIds.size > 1 && <span className="text-[#B9924F] font-medium"> {selectedRowIds.size} rows selected — bulk-fill is active.</span>}
           </p>
         </div>
 
           <div className="grid gap-2 px-2 pb-2 text-[9px] font-bold tracking-wider uppercase text-[#8A8377]" style={{ gridTemplateColumns: colTemplate }}>
+            <input
+              type="checkbox"
+              checked={visibleRows.length > 0 && visibleRows.every((r) => selectedRowIds.has(r.rowId))}
+              onChange={(e) => {
+                setSelectedRowIds((prev) => {
+                  const next = new Set(prev);
+                  visibleRows.forEach((r) => (e.target.checked ? next.add(r.rowId) : next.delete(r.rowId)));
+                  return next;
+                });
+              }}
+              title="Select all"
+            />
             <span>Name</span><span>Brand</span><span>Category</span><span>Description</span><span>Wholesale</span><span>Retail</span><span>Default</span><span>On Hand</span><span></span>
           </div>
 
           <div className="space-y-1.5">
             {visibleRows.map((r) => (
-              <div key={r.rowId} className={`grid gap-2 items-center rounded-lg ${r.isNew ? "bg-[#FAF8F3] py-1" : ""}`} style={{ gridTemplateColumns: colTemplate }}>
+              <div key={r.rowId} className={`grid gap-2 items-center rounded-lg ${selectedRowIds.has(r.rowId) ? "bg-[#FBEEDA]" : r.isNew ? "bg-[#FAF8F3] py-1" : ""}`} style={{ gridTemplateColumns: colTemplate }}>
+                <input type="checkbox" checked={selectedRowIds.has(r.rowId)} onChange={() => toggleRowSelected(r.rowId)} />
                 <input value={r.name} onChange={(e) => updateRow(r.rowId, "name", e.target.value)} className="input input-sm" placeholder={r.isNew ? "New product name" : ""} />
                 <Combobox value={r.brand} onChange={(v) => updateRow(r.rowId, "brand", v)} options={memory.brand || []} placeholder="Brand" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("brand", v)} />
                 <Combobox value={r.category} onChange={(v) => updateRow(r.rowId, "category", v)} options={memory.category || []} placeholder="Category" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("category", v)} />
