@@ -178,6 +178,8 @@ window.storage = { get: storageGet, set: storageSet, delete: storageDelete };
 const PRODUCTS_KEY = "aster-natural-products-v2";
 const MEMORY_KEY = "aster-field-memory-v2";
 const MEDIA_INDEX_KEY = "aster-media-index-v2";
+const BUDGET_CATEGORIES_KEY = "aster-budget-categories-v1";
+const BUDGET_TRANSACTIONS_KEY = "aster-budget-transactions-v1";
 
 const TABS = ["Product", "Inventory", "Media", "Shopify"];
 
@@ -342,6 +344,9 @@ function ProductCatalogApp() {
   const [createOpen, setCreateOpen] = useState(false);
   const [savedDrafts, setSavedDrafts] = useState([]);
   const [sort, setSort] = useState("Name A-Z");
+  const [appSection, setAppSection] = useState("Products"); // top-level: "Products" | "Budget" — separate from the product-editing tabs
+  const [budgetCategories, setBudgetCategories] = useState([]); // [{ id, name, budgetAmount }]
+  const [budgetTransactions, setBudgetTransactions] = useState([]); // [{ id, categoryId, type: "estimate"|"actual", amount, description, date, reconciled, actualAmount, discrepancyNote }]
   const [modalOpen, setModalOpen] = useState(false);
   const [pickingImages, setPickingImages] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -396,6 +401,14 @@ function ProductCatalogApp() {
           const parsedMem = JSON.parse(mem.value);
           setMemory((prev) => ({ ...prev, ...parsedMem, source: parsedMem.source || [], type: parsedMem.type || [] }));
         }
+      } catch (e) {}
+      try {
+        const bc = await window.storage.get(BUDGET_CATEGORIES_KEY, false);
+        if (bc && bc.value) setBudgetCategories(JSON.parse(bc.value));
+      } catch (e) {}
+      try {
+        const bt = await window.storage.get(BUDGET_TRANSACTIONS_KEY, false);
+        if (bt && bt.value) setBudgetTransactions(JSON.parse(bt.value));
       } catch (e) {}
       try {
         const idx = await window.storage.get(MEDIA_INDEX_KEY, false);
@@ -611,6 +624,119 @@ function ProductCatalogApp() {
     setMediaIndex((prev) => prev.map((m) =>
       mediaIds.includes(m.id) ? { ...m, assignedProductId: productId } : m
     ));
+  };
+
+  // ── Budget: categories + transactions (auto-saves immediately, like a ledger — no draft/Save step) ──
+  const persistBudgetCategories = (next) => {
+    setBudgetCategories(next);
+    window.storage?.set(BUDGET_CATEGORIES_KEY, JSON.stringify(next), false).catch(() => {});
+  };
+  const persistBudgetTransactions = (next) => {
+    setBudgetTransactions(next);
+    window.storage?.set(BUDGET_TRANSACTIONS_KEY, JSON.stringify(next), false).catch(() => {});
+  };
+
+  const addBudgetCategory = (name, budgetAmount) => {
+    if (!name.trim()) return;
+    const cat = { id: Date.now().toString(36) + Math.random().toString(36).slice(2), name: name.trim(), budgetAmount: budgetAmount || "0" };
+    persistBudgetCategories([...budgetCategories, cat]);
+  };
+
+  const updateBudgetCategory = (id, field, value) => {
+    persistBudgetCategories(budgetCategories.map((c) => (c.id === id ? { ...c, [field]: value } : c)));
+  };
+
+  const deleteBudgetCategory = (id) => {
+    persistBudgetCategories(budgetCategories.filter((c) => c.id !== id));
+    persistBudgetTransactions(budgetTransactions.filter((t) => t.categoryId !== id));
+  };
+
+  const addBudgetTransaction = (categoryId, type, amount, description, date, notes) => {
+    const tx = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      categoryId,
+      type, // "addfunds" | "estimate" | "spend" | "borrow"
+      amount: amount || "0",
+      description: description || "",
+      date: date || new Date().toISOString().slice(0, 10),
+      notes: notes || "",
+      included: true, // universal toggle — every transaction type can be switched out of the budget view
+      discrepancyNote: "",
+      originalAmount: "", // set when an estimate/borrow is later converted, if the final amount differs
+      convertedFrom: null, // "estimate" | "borrow" — set once a conversion happens, for a small audit trail
+    };
+    persistBudgetTransactions([tx, ...budgetTransactions]);
+  };
+
+  const deleteBudgetTransaction = (id) => {
+    persistBudgetTransactions(budgetTransactions.filter((t) => t.id !== id));
+  };
+
+  // Universal include/exclude toggle for any transaction type — lets any
+  // entry be temporarily left out of the budget's totals without deleting it.
+  const toggleTransactionIncluded = (id) => {
+    persistBudgetTransactions(
+      budgetTransactions.map((t) => {
+        if (t.id !== id) return t;
+        const current = t.included !== undefined ? t.included : !t.excluded;
+        return { ...t, included: !current };
+      })
+    );
+  };
+
+  // Converts an Estimate into a Spend — the Estimate stays as its own
+  // listing (auto-excluded from totals so nothing double-counts, but still
+  // visible for history), and a brand new Spend transaction is created
+  // alongside it, with its own independent notes field.
+  const convertEstimateToSpend = (id, actualAmount, discrepancyNote) => {
+    const original = budgetTransactions.find((t) => t.id === id);
+    if (!original) return;
+    const newTx = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      categoryId: original.categoryId,
+      type: "spend",
+      amount: actualAmount || original.amount,
+      description: original.description,
+      date: new Date().toISOString().slice(0, 10),
+      notes: "",
+      included: true,
+      discrepancyNote: discrepancyNote || "",
+      originalAmount: original.amount,
+      convertedFrom: "estimate",
+      convertedFromId: original.id,
+    };
+    const updatedOriginal = { ...original, included: false, convertedIntoId: newTx.id };
+    persistBudgetTransactions([newTx, ...budgetTransactions.map((t) => (t.id === id ? updatedOriginal : t))]);
+  };
+
+  // Converts a Borrow into an Add Funds transaction once it's been paid off
+  // — the Borrow stays as its own listing (auto-excluded so it stops
+  // weighing on the budget, but still visible for history), and a brand
+  // new Add Funds transaction is created alongside it, dated to when it
+  // was actually returned, with its own independent notes field.
+  const convertBorrowToAddFunds = (id, repaidAmount, returnedDate) => {
+    const original = budgetTransactions.find((t) => t.id === id);
+    if (!original) return;
+    const newTx = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      categoryId: original.categoryId,
+      type: "addfunds",
+      amount: repaidAmount || original.amount,
+      description: original.description,
+      date: returnedDate || new Date().toISOString().slice(0, 10),
+      notes: "",
+      included: true,
+      discrepancyNote: "",
+      originalAmount: original.amount,
+      convertedFrom: "borrow",
+      convertedFromId: original.id,
+    };
+    const updatedOriginal = { ...original, included: false, convertedIntoId: newTx.id };
+    persistBudgetTransactions([newTx, ...budgetTransactions.map((t) => (t.id === id ? updatedOriginal : t))]);
+  };
+
+  const updateBudgetTransactionField = (id, field, value) => {
+    persistBudgetTransactions(budgetTransactions.map((t) => (t.id === id ? { ...t, [field]: value } : t)));
   };
 
   // Immediately syncs an inventory field change to both products and open draft
@@ -1254,6 +1380,48 @@ function ProductCatalogApp() {
   };
 
   return (
+    <>
+      {/* Top-level section switcher — separate from the product-editing tabs below */}
+      <div className="bg-[#242320] px-6 py-2 flex items-center gap-1.5">
+        <button
+          onClick={() => setAppSection("Products")}
+          className={`text-[12px] font-medium px-3.5 py-1.5 rounded-full transition ${appSection === "Products" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
+          style={appSection === "Products" ? { backgroundColor: "#B9924F" } : {}}
+        >
+          Products
+        </button>
+        <button
+          onClick={() => setAppSection("Budget")}
+          className={`text-[12px] font-medium px-3.5 py-1.5 rounded-full transition ${appSection === "Budget" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
+          style={appSection === "Budget" ? { backgroundColor: "#B9924F" } : {}}
+        >
+          Budget
+        </button>
+      </div>
+
+      <style>{`
+        .input { width: 100%; border: 1px solid #E3DDCC; border-radius: 10px; padding: 9px 11px; font-size: 13.5px; outline: none; background: white; color: #242320; font-family: inherit; }
+        .input:focus { border-color: #B9924F; }
+        .input-sm { padding: 6px 9px; font-size: 12.5px; border-radius: 8px; }
+        textarea.input { resize: vertical; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
+
+      {appSection === "Budget" ? (
+        <BudgetSection
+          categories={budgetCategories}
+          transactions={budgetTransactions}
+          onAddCategory={addBudgetCategory}
+          onUpdateCategory={updateBudgetCategory}
+          onDeleteCategory={deleteBudgetCategory}
+          onAddTransaction={addBudgetTransaction}
+          onDeleteTransaction={deleteBudgetTransaction}
+          onToggleIncluded={toggleTransactionIncluded}
+          onConvertEstimate={convertEstimateToSpend}
+          onConvertBorrow={convertBorrowToAddFunds}
+          onUpdateField={updateBudgetTransactionField}
+        />
+      ) : (
     <div style={{ fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif" }} className="min-h-screen bg-[#F6F4EF] text-[#242320]">
       <div className="bg-white border-b border-[#EAE5D9] px-10 py-6 flex items-center justify-between">
         <div>
@@ -2233,15 +2401,9 @@ function ProductCatalogApp() {
           onClose={() => setMediaSearchOpen(false)}
         />
       )}
-
-      <style>{`
-        .input { width: 100%; border: 1px solid #E3DDCC; border-radius: 10px; padding: 9px 11px; font-size: 13.5px; outline: none; background: white; color: #242320; font-family: inherit; }
-        .input:focus { border-color: #B9924F; }
-        .input-sm { padding: 6px 9px; font-size: 12.5px; border-radius: 8px; }
-        textarea.input { resize: vertical; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
     </div>
+      )}
+    </>
   );
 }
 
@@ -2293,6 +2455,502 @@ function money(n) {
   const v = parseFloat(n || 0);
   return isNaN(v) ? "0.00" : v.toFixed(2);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Budget section — top-level, separate from the product catalog
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BUDGET_TYPE_META = {
+  addfunds: { label: "Added Funds", color: "#5B8A6E", bg: "#EBF5EF", border: "#5B8A6E" },
+  estimate: { label: "Estimate",    color: "#2E6B8F", bg: "#EAF3F8", border: "#7FAEC4" },
+  spend:    { label: "Expense",     color: "#8F6B2E", bg: "#FBEEDA", border: "#B9924F" },
+  borrow:   { label: "Loan",        color: "#6E5480", bg: "#F4EEF8", border: "#8A6B9B" },
+};
+// Column order for the 4-column transaction layout
+const BUDGET_TYPE_ORDER = ["estimate", "spend", "borrow", "addfunds"];
+
+// Reads a transaction's include/exclude state, falling back for older
+// records saved before this field existed (always treated as included).
+const isTxIncluded = (t) => (t.included !== undefined ? t.included : !t.excluded);
+
+// Normalizes legacy type names from before this redesign ("actual" → "spend",
+// "loan" → "borrow") so old saved data still calculates and displays correctly.
+const normalizeTxType = (t) => {
+  if (t.type === "actual") return "spend";
+  if (t.type === "loan") return "borrow";
+  return t.type;
+};
+
+// Segmented bar: amber = spend, violet = borrowed (not yet paid off), teal =
+// pending estimates. "Add Funds" isn't a segment — it raises the total budget
+// the bar is measured against instead. Turns red if the deductions exceed it.
+function BudgetBar({ budgetAmount, spend, borrow, pending, big }) {
+  const total = parseFloat(budgetAmount || 0);
+  const spendPct = total > 0 ? Math.min(100, (spend / total) * 100) : (spend > 0 ? 100 : 0);
+  const roomAfterSpend = Math.max(0, 100 - spendPct);
+  const borrowPct = total > 0 ? Math.min(roomAfterSpend, (borrow / total) * 100) : (borrow > 0 ? roomAfterSpend : 0);
+  const roomAfterBorrow = Math.max(0, roomAfterSpend - borrowPct);
+  const pendingPct = total > 0 ? Math.min(roomAfterBorrow, (pending / total) * 100) : (pending > 0 ? roomAfterBorrow : 0);
+  const isOver = total > 0 && spend + borrow + pending > total;
+  return (
+    <div
+      className={`rounded-full bg-[#F0ECE1] overflow-hidden flex ${big ? "h-3" : "h-2"}`}
+      style={isOver ? { boxShadow: "0 0 0 1.5px #C0392B" } : {}}
+    >
+      <div style={{ width: spendPct + "%", backgroundColor: "#B9924F" }} />
+      <div style={{ width: borrowPct + "%", backgroundColor: "#8A6B9B" }} />
+      <div style={{ width: pendingPct + "%", backgroundColor: "#7FAEC4" }} />
+    </div>
+  );
+}
+
+// Donut/wheel version of the same breakdown, shown alongside the bar. Center
+// shows the total budget (base amount plus any Add Funds applied to it).
+function BudgetWheel({ budgetAmount, spend, borrow, pending, size = 92 }) {
+  const total = parseFloat(budgetAmount || 0);
+  const r = size / 2 - 9;
+  const circumference = 2 * Math.PI * r;
+  const denom = total > 0 ? total : (spend + borrow + pending || 1);
+  const isOver = total > 0 && spend + borrow + pending > total;
+  const segments = [
+    { value: spend, color: "#B9924F" },
+    { value: borrow, color: "#8A6B9B" },
+    { value: pending, color: "#7FAEC4" },
+  ];
+  let cumulative = 0;
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#F0ECE1" strokeWidth={9} />
+        {segments.map((seg, i) => {
+          if (seg.value <= 0) return null;
+          const frac = Math.min(1, seg.value / denom);
+          const dash = frac * circumference;
+          const offset = -cumulative * circumference;
+          cumulative += frac;
+          return (
+            <circle
+              key={i} cx={size / 2} cy={size / 2} r={r} fill="none" stroke={seg.color} strokeWidth={9}
+              strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={offset}
+            />
+          );
+        })}
+        {isOver && <circle cx={size / 2} cy={size / 2} r={r + 5.5} fill="none" stroke="#C0392B" strokeWidth={1.5} />}
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-[11px] font-semibold tabular-nums text-[#3F3B34]">${money(total)}</span>
+        <span className="text-[8px] text-[#ACA692] uppercase tracking-wide">budget</span>
+      </div>
+    </div>
+  );
+}
+
+// Small form for converting an Estimate into a Spend (final amount + optional
+// discrepancy note if it differs), or a Borrow into Add Funds (repayment
+// amount + date). Shared shape, different labels depending on `mode`.
+function ConversionForm({ mode, originalAmount, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState(originalAmount);
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const differs = parseFloat(amount || 0) !== parseFloat(originalAmount || 0);
+  const isEstimate = mode === "estimate";
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-[#F0ECE1] space-y-2">
+      <div className="flex items-center gap-2">
+        <label className="text-[11px] text-[#8A8377] shrink-0">
+          {isEstimate ? "Actual amount spent" : "Amount repaid"}
+        </label>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} className="input input-sm" style={{ width: "90px" }} placeholder="0.00" />
+        {!isEstimate && (
+          <>
+            <label className="text-[11px] text-[#8A8377] shrink-0 ml-1">Date returned</label>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="input input-sm" style={{ width: "130px" }} />
+          </>
+        )}
+      </div>
+      {isEstimate && differs && (
+        <div>
+          <label className="text-[11px] text-[#8A8377] block mb-1">This differs from the ${money(originalAmount)} estimate — note why:</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} className="input input-sm" placeholder="e.g. Shipping cost increased" />
+        </div>
+      )}
+      <div className="flex gap-2 pt-0.5">
+        <button onClick={onCancel} className="flex-1 text-[12px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1.5 hover:bg-[#FAF8F3] transition">Cancel</button>
+        <button
+          onClick={() => onConfirm(amount, isEstimate ? (differs ? note : "") : "", date)}
+          className="flex-1 text-[12px] font-medium text-white rounded-lg py-1.5 transition"
+          style={{ backgroundColor: "#B9924F" }}
+        >
+          {isEstimate ? "Confirm Spent" : "Confirm Paid Off"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One ledger line — any of the four types. Left-side toggle icon controls
+// whether it counts toward the budget at all; Estimate/Borrow rows also get
+// a conversion action (→ Spend, → Add Funds respectively).
+function TransactionRow({ tx, onDelete, onToggleIncluded, onConvert, onUpdateField, convertingOpen, onOpenConvert, onCloseConvert }) {
+  const [notesDraft, setNotesDraft] = useState(tx.notes || "");
+  const [editingNotes, setEditingNotes] = useState(false);
+  const type = normalizeTxType(tx);
+  const meta = BUDGET_TYPE_META[type] || BUDGET_TYPE_META.spend;
+  const included = isTxIncluded(tx);
+  const isEstimate = type === "estimate";
+  const isBorrow = type === "borrow";
+  const isResultOfConversion = !!tx.convertedFrom; // this row was created BY a conversion (e.g. the new Expense row)
+  const hasBeenConverted = !!tx.convertedIntoId; // this row (an Estimate/Loan) has ALREADY been converted into a new row
+
+  return (
+    <div className={`border border-[#F0ECE1] rounded-lg px-2 py-1.5 transition ${!included ? "opacity-40" : ""}`}>
+      <div className="flex items-start gap-1.5">
+        <button
+          onClick={onToggleIncluded}
+          title={included ? "Included in budget — click to exclude" : "Excluded from budget — click to include"}
+          className="shrink-0 text-[#B9924F] mt-0.5"
+        >
+          {included ? <CheckSquare size={13} /> : <Square size={13} className="text-[#C1BBAA]" />}
+        </button>
+        <div className="min-w-0 flex-1">
+          <p className="text-[12px] text-[#3F3B34] leading-snug break-words">{tx.description || "—"}</p>
+          <p className="text-[12px] font-medium tabular-nums text-[#3F3B34]">
+            {tx.originalAmount && parseFloat(tx.originalAmount) !== parseFloat(tx.amount) && (
+              <span className="text-[#C1BBAA] line-through mr-1 text-[10px]">${money(tx.originalAmount)}</span>
+            )}
+            ${money(tx.amount)}
+          </p>
+          <p className="text-[9px] text-[#C1BBAA]">
+            {tx.date}
+            {isResultOfConversion && <span className="italic"> · from {tx.convertedFrom}</span>}
+          </p>
+        </div>
+        <button onClick={onDelete} className="text-[#C1BBAA] hover:text-red-400 shrink-0"><X size={11} /></button>
+      </div>
+
+      {(isEstimate || isBorrow) && (
+        hasBeenConverted ? (
+          <p className="text-[10px] text-[#5B8A6E] mt-1 ml-5">
+            ✓ → {isEstimate ? "Expense" : "Added Funds"}
+          </p>
+        ) : (
+          <button onClick={onOpenConvert} className="text-[10px] font-medium mt-1 ml-5" style={{ color: "#B9924F" }}>
+            {isEstimate ? "Mark as Spent →" : "Mark as Paid Off →"}
+          </button>
+        )
+      )}
+
+      {tx.discrepancyNote && (
+        <p className="text-[9.5px] text-[#8A8377] mt-1 pl-1 italic">Note: {tx.discrepancyNote}</p>
+      )}
+
+      {tx.notes || editingNotes ? (
+        <input
+          autoFocus={editingNotes && !tx.notes}
+          value={notesDraft}
+          onChange={(e) => setNotesDraft(e.target.value)}
+          onBlur={() => { setEditingNotes(false); if (notesDraft !== (tx.notes || "")) onUpdateField("notes", notesDraft); }}
+          placeholder="Notes"
+          className="w-full text-[11px] text-[#8A8377] bg-transparent outline-none border-b border-transparent focus:border-[#E3DDCC] mt-1.5 pl-1"
+        />
+      ) : (
+        <button onClick={() => setEditingNotes(true)} className="text-[10px] text-[#C1BBAA] hover:text-[#8A8377] mt-1.5 ml-1">
+          + Notes
+        </button>
+      )}
+
+      {convertingOpen && (
+        <ConversionForm
+          mode={isEstimate ? "estimate" : "borrow"}
+          originalAmount={tx.amount}
+          onCancel={onCloseConvert}
+          onConfirm={(amount, discrepancyNote, date) => onConvert(amount, discrepancyNote, date)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Add Transaction — one of exactly four types.
+function AddTransactionForm({ type, onAdd, onCancel }) {
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState("");
+
+  return (
+    <div className="mt-2 p-2.5 bg-[#FAF8F3] rounded-lg border border-[#E3DDCC] space-y-1.5">
+      <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" className="input input-sm" />
+      <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount ($)" className="input input-sm" />
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="input input-sm" />
+      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)" className="input input-sm" rows={2} />
+      <div className="flex gap-2 pt-0.5">
+        <button onClick={onCancel} className="flex-1 text-[12px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1.5 hover:bg-white transition">Cancel</button>
+        <button
+          onClick={() => { if (amount) onAdd(type, amount, description, date, notes); }}
+          className="flex-1 text-[12px] font-medium text-white rounded-lg py-1.5 transition"
+          style={{ backgroundColor: "#B9924F" }}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BudgetSection({ categories, transactions, onAddCategory, onUpdateCategory, onDeleteCategory, onAddTransaction, onDeleteTransaction, onToggleIncluded, onConvertEstimate, onConvertBorrow, onUpdateField }) {
+  const [activeTab, setActiveTab] = useState("overview");
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+  const [newCatBudget, setNewCatBudget] = useState("");
+  const [addingTxType, setAddingTxType] = useState(null); // which column's "+ Add" is open, or null
+  const [convertingId, setConvertingId] = useState(null);
+
+  const calcForCategory = (catId) => {
+    const txs = transactions.filter((t) => t.categoryId === catId);
+    let spend = 0, borrow = 0, pending = 0, added = 0;
+    txs.forEach((t) => {
+      if (!isTxIncluded(t)) return;
+      const type = normalizeTxType(t);
+      if (type === "addfunds") added += parseFloat(t.amount || 0);
+      else if (type === "spend") spend += parseFloat(t.amount || 0);
+      else if (type === "borrow") borrow += parseFloat(t.amount || 0);
+      else if (type === "estimate") pending += parseFloat(t.amount || 0);
+    });
+    return { spend, borrow, pending, added, txs, effectiveBudget: parseFloat(0) };
+  };
+
+  const withEffectiveBudget = (cat) => {
+    const calc = calcForCategory(cat.id);
+    const effectiveBudget = parseFloat(cat.budgetAmount || 0) + calc.added;
+    return { ...calc, effectiveBudget };
+  };
+
+  const totals = categories.reduce(
+    (acc, c) => {
+      const calc = withEffectiveBudget(c);
+      acc.budget += calc.effectiveBudget;
+      acc.spend += calc.spend;
+      acc.borrow += calc.borrow;
+      acc.pending += calc.pending;
+      return acc;
+    },
+    { budget: 0, spend: 0, borrow: 0, pending: 0 }
+  );
+  const totalRemaining = totals.budget - totals.spend - totals.borrow - totals.pending;
+
+  const activeCategory = activeTab === "overview" ? null : categories.find((c) => c.id === activeTab);
+  const activeCalc = activeCategory ? withEffectiveBudget(activeCategory) : null;
+  const activeRemaining = activeCategory ? activeCalc.effectiveBudget - activeCalc.spend - activeCalc.borrow - activeCalc.pending : 0;
+
+  const Legend = () => (
+    <div className="flex items-center justify-center gap-4 text-[11px] mt-1">
+      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#B9924F" }} />Expense</span>
+      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#8A6B9B" }} />Loan</span>
+      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#7FAEC4" }} />Estimate</span>
+    </div>
+  );
+
+  const renderTxRow = (t) => (
+    <TransactionRow
+      key={t.id}
+      tx={t}
+      onDelete={() => onDeleteTransaction(t.id)}
+      onToggleIncluded={() => onToggleIncluded(t.id)}
+      onUpdateField={(field, value) => onUpdateField(t.id, field, value)}
+      convertingOpen={convertingId === t.id}
+      onOpenConvert={() => setConvertingId(t.id)}
+      onCloseConvert={() => setConvertingId(null)}
+      onConvert={(amount, discrepancyNote, date) => {
+        const type = normalizeTxType(t);
+        if (type === "estimate") onConvertEstimate(t.id, amount, discrepancyNote);
+        else onConvertBorrow(t.id, amount, date);
+        setConvertingId(null);
+      }}
+    />
+  );
+
+  // 4 columns, one per transaction type — each with its own transactions and its own "+ Add" at the bottom
+  const renderTxColumns = (txs) => (
+    <div className="grid grid-cols-4 gap-3 mb-1">
+      {BUDGET_TYPE_ORDER.map((typeKey) => {
+        const meta = BUDGET_TYPE_META[typeKey];
+        const colTxs = txs.filter((t) => normalizeTxType(t) === typeKey);
+        return (
+          <div key={typeKey} className="flex flex-col">
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5 text-center py-1 rounded" style={{ color: meta.color, backgroundColor: meta.bg }}>
+              {meta.label}
+            </p>
+            <div className="space-y-1.5 flex-1">
+              {colTxs.map(renderTxRow)}
+            </div>
+            {addingTxType === typeKey ? (
+              <AddTransactionForm
+                type={typeKey}
+                onAdd={(type, amount, desc, date, notes) => { onAddTransaction(activeCategory.id, type, amount, desc, date, notes); setAddingTxType(null); }}
+                onCancel={() => setAddingTxType(null)}
+              />
+            ) : (
+              <button
+                onClick={() => setAddingTxType(typeKey)}
+                className="mt-2 text-[11px] font-medium py-1.5 rounded-lg border border-dashed transition hover:bg-[#FAF8F3]"
+                style={{ borderColor: meta.border, color: meta.color }}
+              >
+                + Add
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div style={{ fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif" }} className="min-h-screen bg-[#F6F4EF] text-[#242320]">
+      <div className="bg-white border-b border-[#EAE5D9] px-10 py-6">
+        <h1 className="text-[28px] leading-none text-[#242320]">Budget</h1>
+        <p className="text-[13px] text-[#A7A190] mt-1">{categories.length} categor{categories.length === 1 ? "y" : "ies"}</p>
+      </div>
+
+      <div className="bg-white border-b border-[#EAE5D9] px-10 flex items-center gap-1 overflow-x-auto">
+        <button
+          onClick={() => setActiveTab("overview")}
+          className={`text-[13px] font-medium px-4 py-3 border-b-2 -mb-px whitespace-nowrap transition ${activeTab === "overview" ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"}`}
+        >
+          Overview
+        </button>
+        {categories.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => setActiveTab(c.id)}
+            className={`text-[13px] font-medium px-4 py-3 border-b-2 -mb-px whitespace-nowrap transition ${activeTab === c.id ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"}`}
+          >
+            {c.name || "Untitled"}
+          </button>
+        ))}
+        <button onClick={() => { setActiveTab("overview"); setAddingCategory(true); }} className="text-[13px] font-medium px-3 py-3 text-[#B9924F] hover:text-[#8F6B2E] whitespace-nowrap">
+          + Add
+        </button>
+      </div>
+
+      <div className="max-w-3xl mx-auto p-8 space-y-5">
+        {activeTab === "overview" ? (
+          <>
+            <div className="bg-white rounded-2xl border border-[#EAE5D9] p-6">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-[16px] font-semibold text-[#242320]">Total Budget</h2>
+                <p className="text-[22px] font-semibold text-[#242320] tabular-nums">${money(totals.budget)}</p>
+              </div>
+              <div className="flex items-center gap-6">
+                <BudgetWheel budgetAmount={totals.budget} spend={totals.spend} borrow={totals.borrow} pending={totals.pending} size={110} />
+                <div className="flex-1">
+                  <BudgetBar budgetAmount={totals.budget} spend={totals.spend} borrow={totals.borrow} pending={totals.pending} big />
+                  <div className="flex items-center justify-between mt-3 text-[12px]">
+                    <span className="text-[#5B564C]">Expense ${money(totals.spend)}</span>
+                    <span className="text-[#5B564C]">Loan ${money(totals.borrow)}</span>
+                    <span className="text-[#5B564C]">Estimate ${money(totals.pending)}</span>
+                  </div>
+                  <p className={`text-center text-[13px] font-semibold mt-2 ${totalRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+                    {totalRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(totalRemaining))}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {addingCategory ? (
+              <div className="bg-white rounded-2xl border-2 border-[#B9924F] p-4 flex gap-2 items-end">
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Category Name</label>
+                  <input autoFocus value={newCatName} onChange={(e) => setNewCatName(e.target.value)} className="input" placeholder="e.g. Packaging" />
+                </div>
+                <div style={{ width: "140px" }}>
+                  <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Budget ($)</label>
+                  <input value={newCatBudget} onChange={(e) => setNewCatBudget(e.target.value)} className="input" placeholder="0.00" />
+                </div>
+                <button
+                  onClick={() => { onAddCategory(newCatName, newCatBudget); setNewCatName(""); setNewCatBudget(""); setAddingCategory(false); }}
+                  className="text-white rounded-lg px-4 py-2.5 text-[13px] font-medium shrink-0"
+                  style={{ backgroundColor: "#B9924F" }}
+                >
+                  Add
+                </button>
+                <button onClick={() => setAddingCategory(false)} className="text-[#5B564C] border border-[#E3DDCC] rounded-lg px-4 py-2.5 text-[13px] shrink-0 hover:bg-[#FAF8F3] transition">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setAddingCategory(true)} className="w-full border-2 border-dashed border-[#DDD6C4] rounded-2xl py-4 text-[#B9924F] font-medium text-[13px] hover:bg-white hover:border-[#B9924F] transition">
+                + Add Budget Category
+              </button>
+            )}
+
+            {categories.length === 0 && !addingCategory && (
+              <p className="text-center text-[13px] text-[#C1BBAA] py-6">No budget categories yet — add one above to get started.</p>
+            )}
+
+            {categories.length > 0 && (
+              <div className="grid grid-cols-2 gap-3">
+                {categories.map((cat) => {
+                  const calc = withEffectiveBudget(cat);
+                  const remaining = calc.effectiveBudget - calc.spend - calc.borrow - calc.pending;
+                  return (
+                    <button key={cat.id} onClick={() => setActiveTab(cat.id)} className="text-left bg-white rounded-xl border border-[#EAE5D9] p-4 hover:border-[#B9924F] transition">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="text-[13px] font-semibold text-[#3F3B34] truncate">{cat.name || "Untitled"}</p>
+                        <p className="text-[12px] text-[#8A8377] tabular-nums shrink-0">${money(calc.effectiveBudget)}</p>
+                      </div>
+                      <BudgetBar budgetAmount={calc.effectiveBudget} spend={calc.spend} borrow={calc.borrow} pending={calc.pending} />
+                      <p className={`text-[11px] font-medium mt-1.5 ${remaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+                        {remaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(remaining))}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        ) : activeCategory ? (
+          <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5">
+            <div className="flex items-center justify-between mb-2.5 gap-3">
+              <input
+                value={activeCategory.name}
+                onChange={(e) => onUpdateCategory(activeCategory.id, "name", e.target.value)}
+                className="text-[18px] font-semibold bg-transparent outline-none border-b border-transparent focus:border-[#E3DDCC] min-w-0 flex-1"
+              />
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[12px] text-[#8A8377]">Starting Budget $</span>
+                <input
+                  value={activeCategory.budgetAmount}
+                  onChange={(e) => onUpdateCategory(activeCategory.id, "budgetAmount", e.target.value)}
+                  className="w-24 text-[13px] border border-[#E3DDCC] rounded-md px-2 py-1 text-right tabular-nums outline-none focus:border-[#B9924F]"
+                />
+                <button onClick={() => { onDeleteCategory(activeCategory.id); setActiveTab("overview"); }} className="text-[#C1BBAA] hover:text-red-400">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-6 mb-4">
+              <BudgetWheel budgetAmount={activeCalc.effectiveBudget} spend={activeCalc.spend} borrow={activeCalc.borrow} pending={activeCalc.pending} />
+              <div className="flex-1">
+                <BudgetBar budgetAmount={activeCalc.effectiveBudget} spend={activeCalc.spend} borrow={activeCalc.borrow} pending={activeCalc.pending} big />
+                <Legend />
+                <p className={`text-center text-[13px] font-semibold mt-2 ${activeRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+                  {activeRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(activeRemaining))}
+                </p>
+              </div>
+            </div>
+
+            {renderTxColumns(activeCalc.txs)}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+
 
 // Lets an image thumbnail be dragged out of the app — onto the Desktop, into
 // Finder, or into another app like Mail/Word — using the browser's standard
