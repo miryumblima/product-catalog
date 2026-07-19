@@ -96,6 +96,16 @@ const Settings = makeIcon([
   el("circle", { key: 1, cx: 12, cy: 12, r: 3 }),
   el("path", { key: 2, d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }),
 ]);
+const RotateCcw = makeIcon([
+  el("path", { key: 1, d: "M3 12a9 9 0 1 0 3-6.7" }),
+  el("polyline", { key: 2, points: "3 4 3 9 8 9" }),
+]);
+const Minus = makeIcon([el("line", { key: 1, x1: 5, y1: 12, x2: 19, y2: 12 })]);
+const SplitIcon = makeIcon([
+  el("path", { key: 1, d: "M6 3v6a3 3 0 0 0 3 3h9" }),
+  el("path", { key: 2, d: "M15 6l3-3 3 3" }),
+  el("path", { key: 3, d: "M6 21v-6" }),
+]);
 
 // ---- Supabase setup: paste your real keys here ----
 const SUPABASE_URL = "https://tutctqcknozfffeydyih.supabase.co";
@@ -180,6 +190,8 @@ const MEMORY_KEY = "aster-field-memory-v2";
 const MEDIA_INDEX_KEY = "aster-media-index-v2";
 const BUDGET_CATEGORIES_KEY = "aster-budget-categories-v1";
 const BUDGET_TRANSACTIONS_KEY = "aster-budget-transactions-v1";
+const MAIN_BUDGET_KEY = "aster-main-budget-v1";
+const BUDGET_ADJUSTMENTS_KEY = "aster-budget-adjustments-v1";
 
 const TABS = ["Product", "Inventory", "Media", "Shopify"];
 
@@ -345,9 +357,12 @@ function ProductCatalogApp() {
   const [savedDrafts, setSavedDrafts] = useState([]);
   const [sort, setSort] = useState("Name A-Z");
   const [appSection, setAppSection] = useState("Products"); // top-level: "Products" | "Budget" — separate from the product-editing tabs
+  const [mainBudgetAmount, setMainBudgetAmount] = useState(""); // the overall/main budget — its own independently-set number
+  const [budgetAdjustments, setBudgetAdjustments] = useState([]); // [{ id, categoryId (null = Grand Budget), amount (signed), date, notes }]
   const [budgetCategories, setBudgetCategories] = useState([]); // [{ id, name, budgetAmount }]
-  const [budgetTransactions, setBudgetTransactions] = useState([]); // [{ id, categoryId, type: "estimate"|"actual", amount, description, date, reconciled, actualAmount, discrepancyNote }]
+  const [budgetTransactions, setBudgetTransactions] = useState([]); // [{ id, categoryId, type: "estimate"|"expenditure", amount, description, date, notes, included, discrepancyNote, originalAmount, convertedFrom, convertedIntoId }]
   const [modalOpen, setModalOpen] = useState(false);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [pickingImages, setPickingImages] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -409,6 +424,14 @@ function ProductCatalogApp() {
       try {
         const bt = await window.storage.get(BUDGET_TRANSACTIONS_KEY, false);
         if (bt && bt.value) setBudgetTransactions(JSON.parse(bt.value));
+      } catch (e) {}
+      try {
+        const mb = await window.storage.get(MAIN_BUDGET_KEY, false);
+        if (mb && mb.value) setMainBudgetAmount(JSON.parse(mb.value));
+      } catch (e) {}
+      try {
+        const ba = await window.storage.get(BUDGET_ADJUSTMENTS_KEY, false);
+        if (ba && ba.value) setBudgetAdjustments(JSON.parse(ba.value));
       } catch (e) {}
       try {
         const idx = await window.storage.get(MEDIA_INDEX_KEY, false);
@@ -636,9 +659,35 @@ function ProductCatalogApp() {
     window.storage?.set(BUDGET_TRANSACTIONS_KEY, JSON.stringify(next), false).catch(() => {});
   };
 
+  // Drag-and-drop reordering — moves the dragged category/transaction to sit
+  // right where the drop target currently is, preserving everything else's order.
+  const reorderBudgetCategories = (draggedId, targetId) => {
+    if (draggedId === targetId) return;
+    const fromIdx = budgetCategories.findIndex((c) => c.id === draggedId);
+    const toIdx = budgetCategories.findIndex((c) => c.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const reordered = [...budgetCategories];
+    const [moved] = reordered.splice(fromIdx, 1);
+    const newToIdx = reordered.findIndex((c) => c.id === targetId);
+    reordered.splice(newToIdx, 0, moved);
+    persistBudgetCategories(reordered);
+  };
+
+  const reorderBudgetTransactions = (draggedId, targetId) => {
+    if (draggedId === targetId) return;
+    const fromIdx = budgetTransactions.findIndex((t) => t.id === draggedId);
+    const toIdx = budgetTransactions.findIndex((t) => t.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const reordered = [...budgetTransactions];
+    const [moved] = reordered.splice(fromIdx, 1);
+    const newToIdx = reordered.findIndex((t) => t.id === targetId);
+    reordered.splice(newToIdx, 0, moved);
+    persistBudgetTransactions(reordered);
+  };
+
   const addBudgetCategory = (name, budgetAmount) => {
     if (!name.trim()) return;
-    const cat = { id: Date.now().toString(36) + Math.random().toString(36).slice(2), name: name.trim(), budgetAmount: budgetAmount || "0" };
+    const cat = { id: Date.now().toString(36) + Math.random().toString(36).slice(2), name: name.trim(), budgetAmount: budgetAmount || "0", included: true };
     persistBudgetCategories([...budgetCategories, cat]);
   };
 
@@ -651,19 +700,102 @@ function ProductCatalogApp() {
     persistBudgetTransactions(budgetTransactions.filter((t) => t.categoryId !== id));
   };
 
+  const updateMainBudgetAmount = (value) => {
+    setMainBudgetAmount(value);
+    window.storage?.set(MAIN_BUDGET_KEY, JSON.stringify(value), false).catch(() => {});
+  };
+
+  const persistBudgetAdjustments = (next) => {
+    setBudgetAdjustments(next);
+    window.storage?.set(BUDGET_ADJUSTMENTS_KEY, JSON.stringify(next), false).catch(() => {});
+  };
+
+  // Adjusts a budget's amount (Grand Budget if categoryId is null, otherwise
+  // a specific sub-budget) by a signed delta, and records the adjustment as
+  // its own history entry (amount, date, notes) for the collapsible log.
+  const addBudgetAdjustment = (categoryId, delta, notes) => {
+    if (categoryId === null) {
+      updateMainBudgetAmount(String(parseFloat(mainBudgetAmount || 0) + delta));
+    } else {
+      const cat = budgetCategories.find((c) => c.id === categoryId);
+      if (cat) updateBudgetCategory(categoryId, "budgetAmount", String(parseFloat(cat.budgetAmount || 0) + delta));
+    }
+    const entry = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      categoryId,
+      amount: delta,
+      date: new Date().toISOString().slice(0, 10),
+      notes: notes || "",
+    };
+    persistBudgetAdjustments([entry, ...budgetAdjustments]);
+  };
+
+  // Undoes an Estimate→Expense conversion or split: deletes the resulting
+  // Expense transaction and adds its amount back onto the original Estimate
+  // (reactivating it if it had been fully consumed).
+  const reverseConversion = (expenseId) => {
+    const expenseTx = budgetTransactions.find((t) => t.id === expenseId);
+    if (!expenseTx || !expenseTx.convertedFromId) return;
+    const amt = parseFloat(expenseTx.amount || 0);
+    persistBudgetTransactions(
+      budgetTransactions
+        .filter((t) => t.id !== expenseId)
+        .map((t) =>
+          t.id === expenseTx.convertedFromId
+            ? { ...t, amount: String(parseFloat(t.amount || 0) + amt), included: true, convertedIntoId: null }
+            : t
+        )
+    );
+  };
+
+  // Splits off part of an Estimate as its own Expense, leaving the remainder
+  // of the Estimate active and pending — so it can be split again later,
+  // incrementally, until it's fully spent.
+  const splitEstimateToExpenditure = (id, splitAmount, notes) => {
+    const original = budgetTransactions.find((t) => t.id === id);
+    if (!original) return;
+    const originalAmt = parseFloat(original.amount || 0);
+    const splitAmt = Math.min(parseFloat(splitAmount || 0), originalAmt);
+    if (splitAmt <= 0) return;
+    const remaining = originalAmt - splitAmt;
+    const newTx = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      categoryId: original.categoryId,
+      type: "expenditure",
+      amount: String(splitAmt),
+      description: original.description,
+      date: new Date().toISOString().slice(0, 10),
+      notes: notes || "",
+      included: true,
+      discrepancyNote: "",
+      originalAmount: "",
+      convertedFrom: "estimate",
+      convertedFromId: original.id,
+    };
+    // If the split uses up the whole remaining estimate, treat it like a full
+    // conversion (mark it consumed); otherwise keep the estimate active with
+    // its reduced amount, ready to be split again.
+    const updatedOriginal = remaining <= 0.004
+      ? { ...original, amount: "0", included: false, convertedIntoId: newTx.id }
+      : { ...original, amount: String(remaining) };
+    persistBudgetTransactions([newTx, ...budgetTransactions.map((t) => (t.id === id ? updatedOriginal : t))]);
+  };
+
+  // categoryId may be null — that means a general transaction that belongs
+  // to the Main budget directly, not to any specific sub-budget/category.
   const addBudgetTransaction = (categoryId, type, amount, description, date, notes) => {
     const tx = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-      categoryId,
-      type, // "addfunds" | "estimate" | "spend" | "borrow"
+      categoryId: categoryId || null,
+      type, // "estimate" | "expenditure"
       amount: amount || "0",
       description: description || "",
       date: date || new Date().toISOString().slice(0, 10),
       notes: notes || "",
-      included: true, // universal toggle — every transaction type can be switched out of the budget view
+      included: true, // universal toggle — either type can be switched out of the budget view
       discrepancyNote: "",
-      originalAmount: "", // set when an estimate/borrow is later converted, if the final amount differs
-      convertedFrom: null, // "estimate" | "borrow" — set once a conversion happens, for a small audit trail
+      originalAmount: "", // set when an estimate is later converted, if the final amount differs
+      convertedFrom: null, // "estimate" — set once a conversion happens, for a small audit trail
     };
     persistBudgetTransactions([tx, ...budgetTransactions]);
   };
@@ -672,8 +804,8 @@ function ProductCatalogApp() {
     persistBudgetTransactions(budgetTransactions.filter((t) => t.id !== id));
   };
 
-  // Universal include/exclude toggle for any transaction type — lets any
-  // entry be temporarily left out of the budget's totals without deleting it.
+  // Universal include/exclude toggle — lets either type be temporarily left
+  // out of the budget's totals without deleting it.
   const toggleTransactionIncluded = (id) => {
     persistBudgetTransactions(
       budgetTransactions.map((t) => {
@@ -684,17 +816,17 @@ function ProductCatalogApp() {
     );
   };
 
-  // Converts an Estimate into a Spend — the Estimate stays as its own
+  // Converts an Estimate into an Expenditure — the Estimate stays as its own
   // listing (auto-excluded from totals so nothing double-counts, but still
-  // visible for history), and a brand new Spend transaction is created
+  // visible for history), and a brand new Expenditure transaction is created
   // alongside it, with its own independent notes field.
-  const convertEstimateToSpend = (id, actualAmount, discrepancyNote) => {
+  const convertEstimateToExpenditure = (id, actualAmount, discrepancyNote) => {
     const original = budgetTransactions.find((t) => t.id === id);
     if (!original) return;
     const newTx = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       categoryId: original.categoryId,
-      type: "spend",
+      type: "expenditure",
       amount: actualAmount || original.amount,
       description: original.description,
       date: new Date().toISOString().slice(0, 10),
@@ -703,32 +835,6 @@ function ProductCatalogApp() {
       discrepancyNote: discrepancyNote || "",
       originalAmount: original.amount,
       convertedFrom: "estimate",
-      convertedFromId: original.id,
-    };
-    const updatedOriginal = { ...original, included: false, convertedIntoId: newTx.id };
-    persistBudgetTransactions([newTx, ...budgetTransactions.map((t) => (t.id === id ? updatedOriginal : t))]);
-  };
-
-  // Converts a Borrow into an Add Funds transaction once it's been paid off
-  // — the Borrow stays as its own listing (auto-excluded so it stops
-  // weighing on the budget, but still visible for history), and a brand
-  // new Add Funds transaction is created alongside it, dated to when it
-  // was actually returned, with its own independent notes field.
-  const convertBorrowToAddFunds = (id, repaidAmount, returnedDate) => {
-    const original = budgetTransactions.find((t) => t.id === id);
-    if (!original) return;
-    const newTx = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-      categoryId: original.categoryId,
-      type: "addfunds",
-      amount: repaidAmount || original.amount,
-      description: original.description,
-      date: returnedDate || new Date().toISOString().slice(0, 10),
-      notes: "",
-      included: true,
-      discrepancyNote: "",
-      originalAmount: original.amount,
-      convertedFrom: "borrow",
       convertedFromId: original.id,
     };
     const updatedOriginal = { ...original, included: false, convertedIntoId: newTx.id };
@@ -1382,17 +1488,17 @@ function ProductCatalogApp() {
   return (
     <>
       {/* Top-level section switcher — separate from the product-editing tabs below */}
-      <div className="bg-[#242320] px-6 py-2 flex items-center gap-1.5">
+      <div className="bg-[#242320] px-6 py-2.5 flex items-center gap-2">
         <button
           onClick={() => setAppSection("Products")}
-          className={`text-[12px] font-medium px-3.5 py-1.5 rounded-full transition ${appSection === "Products" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
+          className={`text-[13px] font-semibold px-4 py-1.5 rounded-full transition tracking-wide ${appSection === "Products" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
           style={appSection === "Products" ? { backgroundColor: "#B9924F" } : {}}
         >
           Products
         </button>
         <button
           onClick={() => setAppSection("Budget")}
-          className={`text-[12px] font-medium px-3.5 py-1.5 rounded-full transition ${appSection === "Budget" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
+          className={`text-[13px] font-semibold px-4 py-1.5 rounded-full transition tracking-wide ${appSection === "Budget" ? "text-white" : "text-[#C4BFB0] hover:text-white"}`}
           style={appSection === "Budget" ? { backgroundColor: "#B9924F" } : {}}
         >
           Budget
@@ -1409,23 +1515,30 @@ function ProductCatalogApp() {
 
       {appSection === "Budget" ? (
         <BudgetSection
+          mainBudgetAmount={mainBudgetAmount}
+          onUpdateMainBudget={updateMainBudgetAmount}
           categories={budgetCategories}
           transactions={budgetTransactions}
+          adjustments={budgetAdjustments}
           onAddCategory={addBudgetCategory}
           onUpdateCategory={updateBudgetCategory}
           onDeleteCategory={deleteBudgetCategory}
           onAddTransaction={addBudgetTransaction}
           onDeleteTransaction={deleteBudgetTransaction}
           onToggleIncluded={toggleTransactionIncluded}
-          onConvertEstimate={convertEstimateToSpend}
-          onConvertBorrow={convertBorrowToAddFunds}
+          onConvertEstimate={convertEstimateToExpenditure}
+          onSplitEstimate={splitEstimateToExpenditure}
+          onReverseConversion={reverseConversion}
+          onAddAdjustment={addBudgetAdjustment}
           onUpdateField={updateBudgetTransactionField}
+          onReorderCategories={reorderBudgetCategories}
+          onReorderTransactions={reorderBudgetTransactions}
         />
       ) : (
     <div style={{ fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif" }} className="min-h-screen bg-[#F6F4EF] text-[#242320]">
       <div className="bg-white border-b border-[#EAE5D9] px-10 py-6 flex items-center justify-between">
         <div>
-          <h1 className="text-[28px] leading-none text-[#242320]">
+          <h1 className="text-[32px] font-semibold leading-none text-[#242320] tracking-tight">
             Product<span className="text-[#B9924F]">.</span>Catalog
           </h1>
           <p className="text-[13px] text-[#A7A190] mt-1">{products.length} products</p>
@@ -1443,51 +1556,40 @@ function ProductCatalogApp() {
             onClick={() => setSummaryOpen(true)}
             className="flex items-center gap-2 text-sm rounded-full px-4 py-2.5 text-[#5B564C] font-medium border border-[#E0DACB] hover:bg-[#FAF8F3]"
           >
-            Inventory Summary
+            <FileText size={14} /> Inventory Summary
           </button>
-          {/* Backup / Restore — tiny icon buttons, not part of routine workflow */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={exportData}
-              disabled={exportStatus === "exporting"}
-              title={exportStatus === "exporting" ? "Exporting…" : "Export catalog backup"}
-              className="w-8 h-8 flex items-center justify-center rounded-full text-[#C1BBAA] hover:text-[#8A8377] hover:bg-[#FAF8F3] transition disabled:opacity-50"
-            >
-              <Download size={14} />
-            </button>
-            {exportStatus === "done" && (
-              <div className="absolute right-0 top-full mt-2 z-50 bg-white border border-[#E3DDCC] rounded-lg shadow-lg px-3.5 py-2.5 w-72 text-left">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-[12px] font-medium text-[#3F3B34] flex items-center gap-1.5"><Check size={13} className="text-[#5B8A6E]" /> Saved</p>
-                  <button onClick={() => setExportStatus(null)} className="text-[#C1BBAA] hover:text-[#242320] shrink-0"><X size={12} /></button>
+          {/* Export/Import now live in the gear menu — these are their status toasts and modals, not tied to a specific header icon */}
+          {exportStatus === "done" && (
+            <div className="fixed bottom-6 right-6 z-50 bg-white border border-[#E3DDCC] rounded-lg shadow-lg px-3.5 py-2.5 w-72 text-left">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[12px] font-medium text-[#3F3B34] flex items-center gap-1.5"><Check size={13} className="text-[#5B8A6E]" /> Saved</p>
+                <button onClick={() => setExportStatus(null)} className="text-[#C1BBAA] hover:text-[#242320] shrink-0"><X size={12} /></button>
+              </div>
+              <p className="text-[11px] text-[#5B564C] mt-1 break-all">{exportedFileName}</p>
+              <p className="text-[10px] text-[#8A8377] mt-1.5">
+                {exportUsedPicker
+                  ? "Saved to the folder you chose."
+                  : "This should have gone to your device's Downloads folder — check there or your browser's download history (Ctrl/Cmd+J)."}
+              </p>
+              {!exportUsedPicker && exportPayload && (
+                <div className="mt-2 pt-2 border-t border-[#F0ECE1]">
+                  <p className="text-[10px] text-[#8A8377] mb-1.5">Don't see the file? Copy the backup instead — this always works, then paste it into a new text file and save it with a <strong>.json</strong> ending.</p>
+                  <button
+                    onClick={() => { copyText(exportPayload); setExportCopied(true); setTimeout(() => setExportCopied(false), 2000); }}
+                    className="w-full text-[11px] font-medium rounded-lg py-1.5 border border-[#B9924F] text-[#B9924F] hover:bg-[#FBEEDA] transition"
+                  >
+                    {exportCopied ? "Copied!" : "Copy backup to clipboard"}
+                  </button>
                 </div>
-                <p className="text-[11px] text-[#5B564C] mt-1 break-all">{exportedFileName}</p>
-                <p className="text-[10px] text-[#8A8377] mt-1.5">
-                  {exportUsedPicker
-                    ? "Saved to the folder you chose."
-                    : "This should have gone to your device's Downloads folder — check there or your browser's download history (Ctrl/Cmd+J)."}
-                </p>
-                {!exportUsedPicker && exportPayload && (
-                  <div className="mt-2 pt-2 border-t border-[#F0ECE1]">
-                    <p className="text-[10px] text-[#8A8377] mb-1.5">Don't see the file? Copy the backup instead — this always works, then paste it into a new text file and save it with a <strong>.json</strong> ending.</p>
-                    <button
-                      onClick={() => { copyText(exportPayload); setExportCopied(true); setTimeout(() => setExportCopied(false), 2000); }}
-                      className="w-full text-[11px] font-medium rounded-lg py-1.5 border border-[#B9924F] text-[#B9924F] hover:bg-[#FBEEDA] transition"
-                    >
-                      {exportCopied ? "Copied!" : "Copy backup to clipboard"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            {exportStatus === "error" && (
-              <div className="absolute right-0 top-full mt-2 z-50 bg-white border border-red-200 rounded-lg shadow-lg px-3.5 py-2.5 w-64 text-left">
-                <p className="text-[12px] font-medium text-red-500 flex items-center gap-1.5"><X size={13} /> Export failed</p>
-                <p className="text-[11px] text-[#5B564C] mt-1">{exportMessage}</p>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
+          {exportStatus === "error" && (
+            <div className="fixed bottom-6 right-6 z-50 bg-white border border-red-200 rounded-lg shadow-lg px-3.5 py-2.5 w-64 text-left">
+              <p className="text-[12px] font-medium text-red-500 flex items-center gap-1.5"><X size={13} /> Export failed</p>
+              <p className="text-[11px] text-[#5B564C] mt-1">{exportMessage}</p>
+            </div>
+          )}
           {exportNamePrompt && (
             <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setExportNamePrompt(false)}>
               <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
@@ -1515,25 +1617,15 @@ function ProductCatalogApp() {
               </div>
             </div>
           )}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => importInputRef.current?.click()}
-              title="Import catalog from backup"
-              className="w-8 h-8 flex items-center justify-center rounded-full text-[#C1BBAA] hover:text-[#8A8377] hover:bg-[#FAF8F3] transition"
-            >
-              <Upload size={14} />
-            </button>
-            {importStatus && (
-              <div className={`absolute right-0 top-full mt-2 z-50 bg-white border rounded-lg shadow-lg px-3.5 py-2.5 w-64 text-left ${importStatus === "error" ? "border-red-200" : "border-[#E3DDCC]"}`}>
-                <p className={`text-[12px] font-medium flex items-center gap-1.5 ${importStatus === "error" ? "text-red-500" : "text-[#3F3B34]"}`}>
-                  {importStatus === "error" ? <X size={13} /> : <Check size={13} className="text-[#5B8A6E]" />}
-                  {importStatus === "error" ? "Import failed" : "Restore complete"}
-                </p>
-                <p className="text-[11px] text-[#5B564C] mt-1">{importMessage}</p>
-              </div>
-            )}
-          </div>
+          {importStatus && (
+            <div className={`fixed bottom-6 right-6 z-50 bg-white border rounded-lg shadow-lg px-3.5 py-2.5 w-64 text-left ${importStatus === "error" ? "border-red-200" : "border-[#E3DDCC]"}`}>
+              <p className={`text-[12px] font-medium flex items-center gap-1.5 ${importStatus === "error" ? "text-red-500" : "text-[#3F3B34]"}`}>
+                {importStatus === "error" ? <X size={13} /> : <Check size={13} className="text-[#5B8A6E]" />}
+                {importStatus === "error" ? "Import failed" : "Restore complete"}
+              </p>
+              <p className="text-[11px] text-[#5B564C] mt-1">{importMessage}</p>
+            </div>
+          )}
           <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={(e) => { importData(e.target.files?.[0]); e.target.value = ""; }} />
           {importConfirm && (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setImportConfirm(null)}>
@@ -1584,6 +1676,20 @@ function ProductCatalogApp() {
                   >
                     Manage Categories
                   </button>
+                  <div className="border-t border-[#F0ECE1] my-1" />
+                  <button
+                    onClick={() => { setGearMenuOpen(false); exportData(); }}
+                    disabled={exportStatus === "exporting"}
+                    className="w-full text-left px-3 py-2 text-[12px] text-[#5B564C] hover:bg-[#FAF8F3] transition disabled:opacity-50"
+                  >
+                    {exportStatus === "exporting" ? "Exporting…" : "Export Backup"}
+                  </button>
+                  <button
+                    onClick={() => { setGearMenuOpen(false); importInputRef.current?.click(); }}
+                    className="w-full text-left px-3 py-2 text-[12px] text-[#5B564C] hover:bg-[#FAF8F3] transition"
+                  >
+                    Import Backup
+                  </button>
                 </div>
               </>
             )}
@@ -1614,6 +1720,14 @@ function ProductCatalogApp() {
           </button>
           <button
             type="button"
+            onClick={() => setBulkModalOpen(true)}
+            className="flex items-center gap-2 text-sm rounded-full pl-4 pr-5 py-2.5 font-medium border transition"
+            style={{ borderColor: "#E0DACB", color: "#5B564C", backgroundColor: "white" }}
+          >
+            <CheckSquare size={14} /> Bulk Edit
+          </button>
+          <button
+            type="button"
             onClick={openAddModal}
             className="flex items-center gap-2 text-sm rounded-full pl-4 pr-5 py-2.5 text-white font-medium shadow-sm"
             style={{ backgroundColor: "#B9924F" }}
@@ -1637,7 +1751,7 @@ function ProductCatalogApp() {
       )}
 
       <div className="flex">
-        <div className="w-44 shrink-0 px-4 py-7 border-r border-[#EDE9DE]">
+        <div className="w-56 shrink-0 px-4 py-7 border-r border-[#EDE9DE]">
           <div className="mb-6">
             <p className="text-[8px] tracking-widest text-[#C4BFB0] font-medium mb-2">BROWSE</p>
             <button
@@ -2377,6 +2491,22 @@ function ProductCatalogApp() {
         />
       )}
 
+      {bulkModalOpen && (
+        <BulkProductModal
+          products={products}
+          memory={memory}
+          onRememberValue={rememberValue}
+          onSaveNew={(newProducts) => setProducts((prev) => [...prev, ...newProducts])}
+          onSaveEdits={(updatedProducts) => {
+            setProducts((prev) => prev.map((p) => {
+              const updated = updatedProducts.find((u) => u.id === p.id);
+              return updated ? updated : p;
+            }));
+          }}
+          onClose={() => setBulkModalOpen(false)}
+        />
+      )}
+
       {mediaSearchOpen && (
         <MediaLibraryModal
           mediaIndex={mediaIndex}
@@ -2456,66 +2586,82 @@ function money(n) {
   return isNaN(v) ? "0.00" : v.toFixed(2);
 }
 
+// Formats an ISO date (YYYY-MM-DD) as MM/DD/YY, e.g. "04/13/26"
+function formatDateShort(iso) {
+  if (!iso) return "";
+  const parts = iso.split("-");
+  if (parts.length !== 3) return iso;
+  const [y, m, d] = parts;
+  return `${m}/${d}/${y.slice(2)}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Budget section — top-level, separate from the product catalog
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BUDGET_TYPE_META = {
-  addfunds: { label: "Added Funds", color: "#5B8A6E", bg: "#EBF5EF", border: "#5B8A6E" },
-  estimate: { label: "Estimate",    color: "#2E6B8F", bg: "#EAF3F8", border: "#7FAEC4" },
-  spend:    { label: "Expense",     color: "#8F6B2E", bg: "#FBEEDA", border: "#B9924F" },
-  borrow:   { label: "Loan",        color: "#6E5480", bg: "#F4EEF8", border: "#8A6B9B" },
+  estimate:    { label: "Estimate", color: "#5B564C", bg: "#EDE9DE", border: "#ACA692" },
+  expenditure: { label: "Expense",  color: "#8F6B2E", bg: "#FBEEDA", border: "#B9924F" },
 };
-// Column order for the 4-column transaction layout
-const BUDGET_TYPE_ORDER = ["estimate", "spend", "borrow", "addfunds"];
+const BUDGET_TYPE_ORDER = ["estimate", "expenditure"];
 
 // Reads a transaction's include/exclude state, falling back for older
 // records saved before this field existed (always treated as included).
 const isTxIncluded = (t) => (t.included !== undefined ? t.included : !t.excluded);
 
-// Normalizes legacy type names from before this redesign ("actual" → "spend",
-// "loan" → "borrow") so old saved data still calculates and displays correctly.
+// Normalizes type names from every prior iteration of this feature so old
+// saved data keeps calculating correctly.
 const normalizeTxType = (t) => {
-  if (t.type === "actual") return "spend";
-  if (t.type === "loan") return "borrow";
+  if (["actual", "spend", "loan", "borrow", "addfunds"].includes(t.type)) return "expenditure";
   return t.type;
 };
 
-// Segmented bar: amber = spend, violet = borrowed (not yet paid off), teal =
-// pending estimates. "Add Funds" isn't a segment — it raises the total budget
-// the bar is measured against instead. Turns red if the deductions exceed it.
-function BudgetBar({ budgetAmount, spend, borrow, pending, big }) {
+// Segmented bar: amber = expense, teal = pending estimates, cream track =
+// remaining. Turns red if expense+estimate exceeds the budget.
+// A standard sliding toggle switch (pill track + circle), used anywhere
+// something needs to be included/excluded — transactions or entire budgets.
+function ToggleSwitch({ on, onChange, title }) {
+  const width = 26, height = 15, circle = height - 4;
+  return (
+    <button onClick={onChange} title={title} className="shrink-0" style={{ width, height, borderRadius: height / 2, backgroundColor: on ? "#D9CBAE" : "#E3DDCC", position: "relative", transition: "background-color 0.15s" }}>
+      <span
+        style={{
+          position: "absolute", top: 2, left: on ? width - circle - 2 : 2,
+          width: circle, height: circle, borderRadius: "50%", backgroundColor: "white",
+          transition: "left 0.15s", boxShadow: "0 1px 2px rgba(0,0,0,0.15)",
+        }}
+      />
+    </button>
+  );
+}
+
+function BudgetBar({ budgetAmount, expenditure, pending, big }) {
   const total = parseFloat(budgetAmount || 0);
-  const spendPct = total > 0 ? Math.min(100, (spend / total) * 100) : (spend > 0 ? 100 : 0);
-  const roomAfterSpend = Math.max(0, 100 - spendPct);
-  const borrowPct = total > 0 ? Math.min(roomAfterSpend, (borrow / total) * 100) : (borrow > 0 ? roomAfterSpend : 0);
-  const roomAfterBorrow = Math.max(0, roomAfterSpend - borrowPct);
-  const pendingPct = total > 0 ? Math.min(roomAfterBorrow, (pending / total) * 100) : (pending > 0 ? roomAfterBorrow : 0);
-  const isOver = total > 0 && spend + borrow + pending > total;
+  const expPct = total > 0 ? Math.min(100, (expenditure / total) * 100) : (expenditure > 0 ? 100 : 0);
+  const roomLeft = Math.max(0, 100 - expPct);
+  const pendingPct = total > 0 ? Math.min(roomLeft, (pending / total) * 100) : (pending > 0 ? roomLeft : 0);
+  const isOver = total > 0 && expenditure + pending > total;
   return (
     <div
       className={`rounded-full bg-[#F0ECE1] overflow-hidden flex ${big ? "h-3" : "h-2"}`}
       style={isOver ? { boxShadow: "0 0 0 1.5px #C0392B" } : {}}
     >
-      <div style={{ width: spendPct + "%", backgroundColor: "#B9924F" }} />
-      <div style={{ width: borrowPct + "%", backgroundColor: "#8A6B9B" }} />
-      <div style={{ width: pendingPct + "%", backgroundColor: "#7FAEC4" }} />
+      <div style={{ width: pendingPct + "%", backgroundColor: "#ACA692" }} />
+      <div style={{ width: expPct + "%", backgroundColor: "#B9924F" }} />
     </div>
   );
 }
 
-// Donut/wheel version of the same breakdown, shown alongside the bar. Center
-// shows the total budget (base amount plus any Add Funds applied to it).
-function BudgetWheel({ budgetAmount, spend, borrow, pending, size = 92 }) {
+// Donut/wheel version of the same breakdown. Center shows the set budget.
+function BudgetWheel({ budgetAmount, expenditure, pending, size = 92 }) {
   const total = parseFloat(budgetAmount || 0);
   const r = size / 2 - 9;
   const circumference = 2 * Math.PI * r;
-  const denom = total > 0 ? total : (spend + borrow + pending || 1);
-  const isOver = total > 0 && spend + borrow + pending > total;
+  const denom = total > 0 ? total : (expenditure + pending || 1);
+  const isOver = total > 0 && expenditure + pending > total;
   const segments = [
-    { value: spend, color: "#B9924F" },
-    { value: borrow, color: "#8A6B9B" },
-    { value: pending, color: "#7FAEC4" },
+    { value: expenditure, color: "#B9924F" },
+    { value: pending, color: "#ACA692" },
   ];
   let cumulative = 0;
   return (
@@ -2538,141 +2684,171 @@ function BudgetWheel({ budgetAmount, spend, borrow, pending, size = 92 }) {
         {isOver && <circle cx={size / 2} cy={size / 2} r={r + 5.5} fill="none" stroke="#C0392B" strokeWidth={1.5} />}
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-[11px] font-semibold tabular-nums text-[#3F3B34]">${money(total)}</span>
-        <span className="text-[8px] text-[#ACA692] uppercase tracking-wide">budget</span>
+        <span className="text-[11px] font-semibold tabular-nums text-[#3F3B34]">${money(expenditure + pending)}</span>
+        <span className="text-[8px] text-[#ACA692] uppercase tracking-wide">used</span>
       </div>
     </div>
   );
 }
 
-// Small form for converting an Estimate into a Spend (final amount + optional
-// discrepancy note if it differs), or a Borrow into Add Funds (repayment
-// amount + date). Shared shape, different labels depending on `mode`.
-function ConversionForm({ mode, originalAmount, onConfirm, onCancel }) {
+// Converts an Estimate into an Expense — final amount, and a note if it differs.
+function ConversionForm({ originalAmount, onConfirm, onCancel }) {
   const [amount, setAmount] = useState(originalAmount);
   const [note, setNote] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const differs = parseFloat(amount || 0) !== parseFloat(originalAmount || 0);
-  const isEstimate = mode === "estimate";
 
   return (
-    <div className="mt-2.5 pt-2.5 border-t border-[#F0ECE1] space-y-2">
+    <div className="mt-2 pt-2 border-t border-[#F0ECE1] space-y-1.5">
       <div className="flex items-center gap-2">
-        <label className="text-[11px] text-[#8A8377] shrink-0">
-          {isEstimate ? "Actual amount spent" : "Amount repaid"}
-        </label>
-        <input value={amount} onChange={(e) => setAmount(e.target.value)} className="input input-sm" style={{ width: "90px" }} placeholder="0.00" />
-        {!isEstimate && (
-          <>
-            <label className="text-[11px] text-[#8A8377] shrink-0 ml-1">Date returned</label>
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="input input-sm" style={{ width: "130px" }} />
-          </>
-        )}
+        <label className="text-[10.5px] text-[#8A8377] shrink-0">Actual amount spent</label>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} className="input input-sm" style={{ width: "80px" }} placeholder="0.00" />
       </div>
-      {isEstimate && differs && (
-        <div>
-          <label className="text-[11px] text-[#8A8377] block mb-1">This differs from the ${money(originalAmount)} estimate — note why:</label>
-          <input value={note} onChange={(e) => setNote(e.target.value)} className="input input-sm" placeholder="e.g. Shipping cost increased" />
-        </div>
-      )}
-      <div className="flex gap-2 pt-0.5">
-        <button onClick={onCancel} className="flex-1 text-[12px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1.5 hover:bg-[#FAF8F3] transition">Cancel</button>
+      <input value={note} onChange={(e) => setNote(e.target.value)} className="input input-sm" placeholder="Notes (optional)" />
+      <div className="flex gap-1.5 pt-0.5">
+        <button onClick={onCancel} className="flex-1 text-[11px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1 hover:bg-[#FAF8F3] transition">Cancel</button>
         <button
-          onClick={() => onConfirm(amount, isEstimate ? (differs ? note : "") : "", date)}
-          className="flex-1 text-[12px] font-medium text-white rounded-lg py-1.5 transition"
+          onClick={() => onConfirm(amount, note)}
+          className="flex-1 text-[11px] font-medium text-white rounded-lg py-1 transition"
           style={{ backgroundColor: "#B9924F" }}
         >
-          {isEstimate ? "Confirm Spent" : "Confirm Paid Off"}
+          Confirm Spent
         </button>
       </div>
     </div>
   );
 }
 
-// One ledger line — any of the four types. Left-side toggle icon controls
-// whether it counts toward the budget at all; Estimate/Borrow rows also get
-// a conversion action (→ Spend, → Add Funds respectively).
-function TransactionRow({ tx, onDelete, onToggleIncluded, onConvert, onUpdateField, convertingOpen, onOpenConvert, onCloseConvert }) {
-  const [notesDraft, setNotesDraft] = useState(tx.notes || "");
-  const [editingNotes, setEditingNotes] = useState(false);
-  const type = normalizeTxType(tx);
-  const meta = BUDGET_TYPE_META[type] || BUDGET_TYPE_META.spend;
-  const included = isTxIncluded(tx);
-  const isEstimate = type === "estimate";
-  const isBorrow = type === "borrow";
-  const isResultOfConversion = !!tx.convertedFrom; // this row was created BY a conversion (e.g. the new Expense row)
-  const hasBeenConverted = !!tx.convertedIntoId; // this row (an Estimate/Loan) has ALREADY been converted into a new row
+// Splits part of an Estimate off as its own Expense, leaving the rest of the
+// Estimate active — so more of it can be split off again later, incrementally.
+function SplitForm({ estimateAmount, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const amt = parseFloat(amount || 0);
+  const remaining = parseFloat(estimateAmount || 0) - amt;
 
   return (
-    <div className={`border border-[#F0ECE1] rounded-lg px-2 py-1.5 transition ${!included ? "opacity-40" : ""}`}>
-      <div className="flex items-start gap-1.5">
+    <div className="mt-2 pt-2 border-t border-[#F0ECE1] space-y-1.5">
+      <div className="flex items-center gap-2">
+        <label className="text-[10.5px] text-[#8A8377] shrink-0">Split off as Expense (of ${money(estimateAmount)})</label>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} className="input input-sm" style={{ width: "80px" }} placeholder="0.00" />
+      </div>
+      {amt > 0 && (
+        <p className="text-[10px] text-[#8A8377]">
+          ${money(Math.max(0, remaining))} will stay as a pending Estimate.
+        </p>
+      )}
+      <input value={note} onChange={(e) => setNote(e.target.value)} className="input input-sm" placeholder="Notes (optional)" />
+      <div className="flex gap-1.5 pt-0.5">
+        <button onClick={onCancel} className="flex-1 text-[11px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1 hover:bg-[#FAF8F3] transition">Cancel</button>
         <button
-          onClick={onToggleIncluded}
-          title={included ? "Included in budget — click to exclude" : "Excluded from budget — click to include"}
-          className="shrink-0 text-[#B9924F] mt-0.5"
+          onClick={() => { if (amt > 0) onConfirm(amount, note); }}
+          className="flex-1 text-[11px] font-medium text-white rounded-lg py-1 transition"
+          style={{ backgroundColor: "#8A8377" }}
         >
-          {included ? <CheckSquare size={13} /> : <Square size={13} className="text-[#C1BBAA]" />}
+          Split Off
         </button>
-        <div className="min-w-0 flex-1">
-          <p className="text-[12px] text-[#3F3B34] leading-snug break-words">{tx.description || "—"}</p>
-          <p className="text-[12px] font-medium tabular-nums text-[#3F3B34]">
-            {tx.originalAmount && parseFloat(tx.originalAmount) !== parseFloat(tx.amount) && (
-              <span className="text-[#C1BBAA] line-through mr-1 text-[10px]">${money(tx.originalAmount)}</span>
-            )}
-            ${money(tx.amount)}
-          </p>
-          <p className="text-[9px] text-[#C1BBAA]">
-            {tx.date}
-            {isResultOfConversion && <span className="italic"> · from {tx.convertedFrom}</span>}
-          </p>
+      </div>
+    </div>
+  );
+}
+
+// One ledger line. Estimate rows get a checkmark to convert to Expense in
+// full, and a "split" icon to convert only part of it, leaving the rest
+// active; Expense rows that came FROM a conversion/split get a reverse-arrows
+// icon to undo it, adding the amount back onto the original Estimate.
+function TransactionRow({ tx, onDelete, onToggleIncluded, onConvert, onSplit, onReverse, onUpdateField, convertingOpen, onOpenConvert, onCloseConvert, splittingOpen, onOpenSplit, onCloseSplit, isDragging, onDragStart, onDragOver, onDrop, onDragEnd }) {
+  const [editing, setEditing] = useState(false);
+  const [descDraft, setDescDraft] = useState(tx.description || "");
+  const [amountDraft, setAmountDraft] = useState(tx.amount || "");
+  const [dateDraft, setDateDraft] = useState(tx.date || "");
+  const [notesDraft, setNotesDraft] = useState(tx.notes || "");
+  const type = normalizeTxType(tx);
+  const included = isTxIncluded(tx);
+  const isEstimate = type === "estimate";
+  const isExpense = type === "expenditure";
+  const isResultOfConversion = !!tx.convertedFrom;
+  const hasBeenConverted = !!tx.convertedIntoId;
+
+  const saveEdit = () => {
+    if (descDraft !== tx.description) onUpdateField("description", descDraft);
+    if (amountDraft !== tx.amount) onUpdateField("amount", amountDraft);
+    if (dateDraft !== tx.date) onUpdateField("date", dateDraft);
+    if (notesDraft !== (tx.notes || "")) onUpdateField("notes", notesDraft);
+    setEditing(false);
+  };
+  const cancelEdit = () => {
+    setDescDraft(tx.description || ""); setAmountDraft(tx.amount || ""); setDateDraft(tx.date || ""); setNotesDraft(tx.notes || "");
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="border border-[#B9924F] rounded-lg px-2 py-1.5 space-y-1">
+        <input value={descDraft} onChange={(e) => setDescDraft(e.target.value)} className="input input-sm" placeholder="Description" />
+        <div className="flex gap-1">
+          <input value={amountDraft} onChange={(e) => setAmountDraft(e.target.value)} className="input input-sm" placeholder="Amount ($)" style={{ flex: 1 }} />
+          <input type="date" value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} className="input input-sm" style={{ flex: 1 }} />
         </div>
-        <button onClick={onDelete} className="text-[#C1BBAA] hover:text-red-400 shrink-0"><X size={11} /></button>
+        <input value={notesDraft} onChange={(e) => setNotesDraft(e.target.value)} className="input input-sm" placeholder="Notes (optional)" />
+        <div className="flex gap-1.5 pt-0.5">
+          <button onClick={cancelEdit} className="flex-1 text-[11px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1 hover:bg-[#FAF8F3] transition">Cancel</button>
+          <button onClick={saveEdit} className="flex-1 text-[11px] font-medium text-white rounded-lg py-1" style={{ backgroundColor: "#B9924F" }}>Save</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={(e) => { e.preventDefault(); if (onDragOver) onDragOver(); }}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      className={`border border-[#F0ECE1] rounded-lg px-2 py-1.5 transition cursor-grab active:cursor-grabbing ${!included ? "opacity-40" : ""} ${isDragging ? "opacity-30" : ""}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <p className="text-[12px] text-[#3F3B34] leading-snug truncate flex-1 min-w-0">
+          <span className="font-medium tabular-nums inline-block text-right" style={{ width: "48px", marginRight: "10px" }}>${money(tx.amount)}</span><span className="text-[9px] text-[#C1BBAA]" style={{ marginRight: "10px" }}>{formatDateShort(tx.date)}</span>{tx.description || "—"}
+        </p>
+        {isEstimate && !hasBeenConverted && (
+          <>
+            <button onClick={onOpenConvert} title="Mark as spent (all of it)" className="shrink-0 text-[#8A8377] hover:text-[#3F3B34]">
+              <Check size={13} />
+            </button>
+            <button onClick={onOpenSplit} title="Split off part of it as Expense" className="shrink-0 text-[#8A8377] hover:text-[#3F3B34]">
+              <SplitIcon size={13} />
+            </button>
+          </>
+        )}
+        {isExpense && isResultOfConversion && (
+          <button onClick={onReverse} title="Reverse — add this amount back onto the Estimate" className="shrink-0 text-[#8A8377] hover:text-[#3F3B34]">
+            <RotateCcw size={12} />
+          </button>
+        )}
+        <button onClick={() => setEditing(true)} title="Edit" className="shrink-0 text-[#C1BBAA] hover:text-[#8A8377]"><Pencil size={12} /></button>
+        <button onClick={onDelete} title="Delete" className="shrink-0 text-[#C1BBAA] hover:text-red-400"><X size={12} /></button>
+        <ToggleSwitch on={included} onChange={onToggleIncluded} title={included ? "Included in budget — click to exclude" : "Excluded from budget — click to include"} />
       </div>
 
-      {(isEstimate || isBorrow) && (
-        hasBeenConverted ? (
-          <p className="text-[10px] text-[#5B8A6E] mt-1 ml-5">
-            ✓ → {isEstimate ? "Expense" : "Added Funds"}
-          </p>
-        ) : (
-          <button onClick={onOpenConvert} className="text-[10px] font-medium mt-1 ml-5" style={{ color: "#B9924F" }}>
-            {isEstimate ? "Mark as Spent →" : "Mark as Paid Off →"}
-          </button>
-        )
-      )}
-
-      {tx.discrepancyNote && (
-        <p className="text-[9.5px] text-[#8A8377] mt-1 pl-1 italic">Note: {tx.discrepancyNote}</p>
-      )}
-
-      {tx.notes || editingNotes ? (
-        <input
-          autoFocus={editingNotes && !tx.notes}
-          value={notesDraft}
-          onChange={(e) => setNotesDraft(e.target.value)}
-          onBlur={() => { setEditingNotes(false); if (notesDraft !== (tx.notes || "")) onUpdateField("notes", notesDraft); }}
-          placeholder="Notes"
-          className="w-full text-[11px] text-[#8A8377] bg-transparent outline-none border-b border-transparent focus:border-[#E3DDCC] mt-1.5 pl-1"
-        />
-      ) : (
-        <button onClick={() => setEditingNotes(true)} className="text-[10px] text-[#C1BBAA] hover:text-[#8A8377] mt-1.5 ml-1">
-          + Notes
-        </button>
+      {(tx.notes || hasBeenConverted || tx.discrepancyNote) && (
+        <p className="text-[10px] text-[#8A8377] mt-1 truncate" style={{ paddingLeft: "58px" }}>
+          {tx.notes}
+          {hasBeenConverted && <span className="text-[#5B8A6E]">{tx.notes ? " — " : ""}converted to Expense</span>}
+          {tx.discrepancyNote && <span>{(tx.notes || hasBeenConverted) ? " — " : ""}{tx.discrepancyNote}</span>}
+        </p>
       )}
 
       {convertingOpen && (
-        <ConversionForm
-          mode={isEstimate ? "estimate" : "borrow"}
-          originalAmount={tx.amount}
-          onCancel={onCloseConvert}
-          onConfirm={(amount, discrepancyNote, date) => onConvert(amount, discrepancyNote, date)}
-        />
+        <ConversionForm originalAmount={tx.amount} onCancel={onCloseConvert} onConfirm={(amount, note) => onConvert(amount, note)} />
+      )}
+      {splittingOpen && (
+        <SplitForm estimateAmount={tx.amount} onCancel={onCloseSplit} onConfirm={(amount, note) => onSplit(amount, note)} />
       )}
     </div>
   );
 }
 
-// Add Transaction — one of exactly four types.
+// Add Transaction — fixed to whichever column it was opened from (Estimate or Expense)
 function AddTransactionForm({ type, onAdd, onCancel }) {
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -2699,58 +2875,135 @@ function AddTransactionForm({ type, onAdd, onCancel }) {
   );
 }
 
-function BudgetSection({ categories, transactions, onAddCategory, onUpdateCategory, onDeleteCategory, onAddTransaction, onDeleteTransaction, onToggleIncluded, onConvertEstimate, onConvertBorrow, onUpdateField }) {
+// Budget amount display: number on top, "+"/"−" icon buttons underneath.
+// Each records a fund adjustment (amount + notes) as its own transaction,
+// listed in a collapsed-by-default history below.
+function BudgetAmountAdjuster({ amount, adjustments, onAdjust, onOverwrite, size = "text-[22px]" }) {
+  const [mode, setMode] = useState(null); // null | "add" | "remove"
+  const [input, setInput] = useState("");
+  const [notes, setNotes] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [amountDraft, setAmountDraft] = useState(money(amount));
+  useEffect(() => { setAmountDraft(money(amount)); }, [amount]);
+
+  const confirm = () => {
+    const delta = parseFloat(input || 0);
+    if (delta > 0) onAdjust(mode === "add" ? delta : -delta, notes);
+    setInput(""); setNotes(""); setMode(null);
+  };
+
+  const saveOverwrite = () => {
+    const val = parseFloat(amountDraft || 0);
+    if (!isNaN(val) && String(val) !== String(parseFloat(amount || 0))) onOverwrite(String(val));
+    setAmountDraft(money(val || 0));
+  };
+
+  return (
+    <div className="flex flex-col items-center">
+      <div className="flex items-center gap-1">
+        <span className={`${size} font-semibold text-[#242320]`}>$</span>
+        <input
+          value={amountDraft}
+          onChange={(e) => setAmountDraft(e.target.value)}
+          onFocus={(e) => e.target.select()}
+          onBlur={saveOverwrite}
+          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          title="Click to type a new amount directly"
+          className={`${size} font-semibold text-[#242320] tabular-nums bg-transparent border-none outline-none text-center`}
+          style={{ width: `${Math.max(3, amountDraft.length + 1)}ch` }}
+        />
+      </div>
+      <div className="flex items-center gap-1.5 mt-1">
+        <button onClick={() => setMode(mode === "add" ? null : "add")} title="Add funds" className="w-6 h-6 flex items-center justify-center rounded-full text-[#8A8377] border border-[#C1BBAA] hover:bg-[#FAF8F3]">
+          <Plus size={13} />
+        </button>
+        <button onClick={() => setMode(mode === "remove" ? null : "remove")} title="Remove funds" className="w-6 h-6 flex items-center justify-center rounded-full text-[#8A8377] border border-[#C1BBAA] hover:bg-[#FAF8F3]">
+          <Minus size={13} />
+        </button>
+      </div>
+
+      {mode && (
+        <div className="mt-2 p-2 bg-[#FAF8F3] rounded-lg border border-[#E3DDCC] space-y-1.5 w-full">
+          <input
+            autoFocus
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") setMode(null); }}
+            placeholder="Amount ($)"
+            className="input input-sm"
+          />
+          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)" className="input input-sm" />
+          <div className="flex gap-1.5">
+            <button onClick={() => setMode(null)} className="flex-1 text-[11px] text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1 hover:bg-white transition">Cancel</button>
+            <button onClick={confirm} className="flex-1 text-[11px] font-medium text-white rounded-lg py-1" style={{ backgroundColor: "#8A8377" }}>
+              {mode === "add" ? "Add" : "Remove"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {adjustments.length > 0 && (
+        <div className="w-full mt-2">
+          <button onClick={() => setHistoryOpen(!historyOpen)} className="flex items-center gap-1 text-[10px] text-[#ACA692] hover:text-[#8A8377] mx-auto">
+            <ChevronDown size={11} style={{ transform: historyOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+            {adjustments.length} adjustment{adjustments.length === 1 ? "" : "s"}
+          </button>
+          {historyOpen && (
+            <div className="mt-1.5 space-y-1">
+              {adjustments.map((a) => (
+                <div key={a.id} className="text-[10px] text-[#8A8377] border border-[#F0ECE1] rounded-md px-2 py-1 flex items-center justify-between gap-2">
+                  <span className="text-[#5B564C] font-medium">
+                    {a.amount >= 0 ? "+" : "−"}${money(Math.abs(a.amount))}
+                  </span>
+                  <span className="text-[#C1BBAA]">{formatDateShort(a.date)}</span>
+                  {a.notes && <span className="flex-1 min-w-0 truncate text-left">{a.notes}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, transactions, adjustments, onAddCategory, onUpdateCategory, onDeleteCategory, onAddTransaction, onDeleteTransaction, onToggleIncluded, onConvertEstimate, onSplitEstimate, onReverseConversion, onAddAdjustment, onUpdateField, onReorderCategories, onReorderTransactions }) {
   const [activeTab, setActiveTab] = useState("overview");
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [newCatBudget, setNewCatBudget] = useState("");
-  const [addingTxType, setAddingTxType] = useState(null); // which column's "+ Add" is open, or null
+  const [addingTxType, setAddingTxType] = useState(null);
   const [convertingId, setConvertingId] = useState(null);
+  const [splittingId, setSplittingId] = useState(null);
+  const [draggedCatId, setDraggedCatId] = useState(null);
+  const [draggedTxId, setDraggedTxId] = useState(null);
 
-  const calcForCategory = (catId) => {
-    const txs = transactions.filter((t) => t.categoryId === catId);
-    let spend = 0, borrow = 0, pending = 0, added = 0;
+  const calcForCategory = (categoryId) => {
+    const txs = transactions.filter((t) => t.categoryId === categoryId);
+    let expense = 0, pending = 0;
     txs.forEach((t) => {
       if (!isTxIncluded(t)) return;
       const type = normalizeTxType(t);
-      if (type === "addfunds") added += parseFloat(t.amount || 0);
-      else if (type === "spend") spend += parseFloat(t.amount || 0);
-      else if (type === "borrow") borrow += parseFloat(t.amount || 0);
+      if (type === "expenditure") expense += parseFloat(t.amount || 0);
       else if (type === "estimate") pending += parseFloat(t.amount || 0);
     });
-    return { spend, borrow, pending, added, txs, effectiveBudget: parseFloat(0) };
+    return { expense, pending, txs };
   };
 
-  const withEffectiveBudget = (cat) => {
-    const calc = calcForCategory(cat.id);
-    const effectiveBudget = parseFloat(cat.budgetAmount || 0) + calc.added;
-    return { ...calc, effectiveBudget };
-  };
+  const categoryCalcs = categories.map((c) => ({ cat: c, ...calcForCategory(c.id) }));
+  const isCategoryIncluded = (c) => (c.included !== undefined ? c.included : true);
 
-  const totals = categories.reduce(
-    (acc, c) => {
-      const calc = withEffectiveBudget(c);
-      acc.budget += calc.effectiveBudget;
-      acc.spend += calc.spend;
-      acc.borrow += calc.borrow;
-      acc.pending += calc.pending;
-      return acc;
-    },
-    { budget: 0, spend: 0, borrow: 0, pending: 0 }
-  );
-  const totalRemaining = totals.budget - totals.spend - totals.borrow - totals.pending;
+  const grandBudget = parseFloat(mainBudgetAmount || 0);
+  const grandExpense = categoryCalcs.filter((c) => isCategoryIncluded(c.cat)).reduce((sum, c) => sum + c.expense, 0);
+  const grandPending = categoryCalcs.filter((c) => isCategoryIncluded(c.cat)).reduce((sum, c) => sum + c.pending, 0);
+  const grandRemaining = grandBudget - grandExpense - grandPending;
+  const grandAdjustments = adjustments.filter((a) => a.categoryId === null);
 
   const activeCategory = activeTab === "overview" ? null : categories.find((c) => c.id === activeTab);
-  const activeCalc = activeCategory ? withEffectiveBudget(activeCategory) : null;
-  const activeRemaining = activeCategory ? activeCalc.effectiveBudget - activeCalc.spend - activeCalc.borrow - activeCalc.pending : 0;
-
-  const Legend = () => (
-    <div className="flex items-center justify-center gap-4 text-[11px] mt-1">
-      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#B9924F" }} />Expense</span>
-      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#8A6B9B" }} />Loan</span>
-      <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#7FAEC4" }} />Estimate</span>
-    </div>
-  );
+  const activeCalc = activeCategory ? calcForCategory(activeCategory.id) : null;
+  const activeBudget = activeCategory ? parseFloat(activeCategory.budgetAmount || 0) : 0;
+  const activeRemaining = activeCategory ? activeBudget - activeCalc.expense - activeCalc.pending : 0;
+  const activeAdjustments = activeCategory ? adjustments.filter((a) => a.categoryId === activeCategory.id) : [];
 
   const renderTxRow = (t) => (
     <TransactionRow
@@ -2762,18 +3015,21 @@ function BudgetSection({ categories, transactions, onAddCategory, onUpdateCatego
       convertingOpen={convertingId === t.id}
       onOpenConvert={() => setConvertingId(t.id)}
       onCloseConvert={() => setConvertingId(null)}
-      onConvert={(amount, discrepancyNote, date) => {
-        const type = normalizeTxType(t);
-        if (type === "estimate") onConvertEstimate(t.id, amount, discrepancyNote);
-        else onConvertBorrow(t.id, amount, date);
-        setConvertingId(null);
-      }}
+      onConvert={(amount, discrepancyNote) => { onConvertEstimate(t.id, amount, discrepancyNote); setConvertingId(null); }}
+      splittingOpen={splittingId === t.id}
+      onOpenSplit={() => setSplittingId(t.id)}
+      onCloseSplit={() => setSplittingId(null)}
+      onSplit={(amount, notes) => { onSplitEstimate(t.id, amount, notes); setSplittingId(null); }}
+      onReverse={() => onReverseConversion(t.id)}
+      isDragging={draggedTxId === t.id}
+      onDragStart={() => setDraggedTxId(t.id)}
+      onDrop={() => { onReorderTransactions(draggedTxId, t.id); setDraggedTxId(null); }}
+      onDragEnd={() => setDraggedTxId(null)}
     />
   );
 
-  // 4 columns, one per transaction type — each with its own transactions and its own "+ Add" at the bottom
   const renderTxColumns = (txs) => (
-    <div className="grid grid-cols-4 gap-3 mb-1">
+    <div className="grid grid-cols-2 gap-3 mb-1">
       {BUDGET_TYPE_ORDER.map((typeKey) => {
         const meta = BUDGET_TYPE_META[typeKey];
         const colTxs = txs.filter((t) => normalizeTxType(t) === typeKey);
@@ -2782,9 +3038,7 @@ function BudgetSection({ categories, transactions, onAddCategory, onUpdateCatego
             <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5 text-center py-1 rounded" style={{ color: meta.color, backgroundColor: meta.bg }}>
               {meta.label}
             </p>
-            <div className="space-y-1.5 flex-1">
-              {colTxs.map(renderTxRow)}
-            </div>
+            <div className="space-y-1.5 flex-1">{colTxs.map(renderTxRow)}</div>
             {addingTxType === typeKey ? (
               <AddTransactionForm
                 type={typeKey}
@@ -2797,7 +3051,7 @@ function BudgetSection({ categories, transactions, onAddCategory, onUpdateCatego
                 className="mt-2 text-[11px] font-medium py-1.5 rounded-lg border border-dashed transition hover:bg-[#FAF8F3]"
                 style={{ borderColor: meta.border, color: meta.color }}
               >
-                + Add
+                + Add {meta.label}
               </button>
             )}
           </div>
@@ -2809,8 +3063,8 @@ function BudgetSection({ categories, transactions, onAddCategory, onUpdateCatego
   return (
     <div style={{ fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif" }} className="min-h-screen bg-[#F6F4EF] text-[#242320]">
       <div className="bg-white border-b border-[#EAE5D9] px-10 py-6">
-        <h1 className="text-[28px] leading-none text-[#242320]">Budget</h1>
-        <p className="text-[13px] text-[#A7A190] mt-1">{categories.length} categor{categories.length === 1 ? "y" : "ies"}</p>
+        <h1 className="text-[32px] font-semibold leading-none text-[#242320] tracking-tight">Budget</h1>
+        <p className="text-[13px] text-[#A7A190] mt-1">{categories.length} budget{categories.length === 1 ? "" : "s"}</p>
       </div>
 
       <div className="bg-white border-b border-[#EAE5D9] px-10 flex items-center gap-1 overflow-x-auto">
@@ -2823,132 +3077,142 @@ function BudgetSection({ categories, transactions, onAddCategory, onUpdateCatego
         {categories.map((c) => (
           <button
             key={c.id}
+            draggable
+            onDragStart={() => setDraggedCatId(c.id)}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={() => { onReorderCategories(draggedCatId, c.id); setDraggedCatId(null); }}
+            onDragEnd={() => setDraggedCatId(null)}
             onClick={() => setActiveTab(c.id)}
-            className={`text-[13px] font-medium px-4 py-3 border-b-2 -mb-px whitespace-nowrap transition ${activeTab === c.id ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"}`}
+            className={`text-[13px] font-medium px-4 py-3 border-b-2 -mb-px whitespace-nowrap transition cursor-grab active:cursor-grabbing ${activeTab === c.id ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"} ${draggedCatId === c.id ? "opacity-40" : ""}`}
           >
             {c.name || "Untitled"}
           </button>
         ))}
-        <button onClick={() => { setActiveTab("overview"); setAddingCategory(true); }} className="text-[13px] font-medium px-3 py-3 text-[#B9924F] hover:text-[#8F6B2E] whitespace-nowrap">
-          + Add
+        <button onClick={() => setAddingCategory(true)} className="text-[13px] font-medium px-3 py-3 text-[#B9924F] hover:text-[#8F6B2E] whitespace-nowrap">
+          + Add Budget
         </button>
       </div>
 
-      <div className="max-w-3xl mx-auto p-8 space-y-5">
-        {activeTab === "overview" ? (
-          <>
-            <div className="bg-white rounded-2xl border border-[#EAE5D9] p-6">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-[16px] font-semibold text-[#242320]">Total Budget</h2>
-                <p className="text-[22px] font-semibold text-[#242320] tabular-nums">${money(totals.budget)}</p>
-              </div>
-              <div className="flex items-center gap-6">
-                <BudgetWheel budgetAmount={totals.budget} spend={totals.spend} borrow={totals.borrow} pending={totals.pending} size={110} />
-                <div className="flex-1">
-                  <BudgetBar budgetAmount={totals.budget} spend={totals.spend} borrow={totals.borrow} pending={totals.pending} big />
-                  <div className="flex items-center justify-between mt-3 text-[12px]">
-                    <span className="text-[#5B564C]">Expense ${money(totals.spend)}</span>
-                    <span className="text-[#5B564C]">Loan ${money(totals.borrow)}</span>
-                    <span className="text-[#5B564C]">Estimate ${money(totals.pending)}</span>
-                  </div>
-                  <p className={`text-center text-[13px] font-semibold mt-2 ${totalRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
-                    {totalRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(totalRemaining))}
-                  </p>
-                </div>
-              </div>
-            </div>
+      <div className="flex max-w-6xl mx-auto p-8 gap-6 items-start">
+        {/* Persistent side panel — Grand Budget, always visible regardless of which tab is active */}
+        <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5 shrink-0" style={{ width: "260px" }}>
+          <h2 className="text-[13px] font-semibold text-[#242320] text-center mb-3">Grand Budget</h2>
+          <div className="flex justify-center mb-3">
+            <BudgetWheel budgetAmount={grandBudget} expenditure={grandExpense} pending={grandPending} size={100} />
+          </div>
+          <BudgetBar budgetAmount={grandBudget} expenditure={grandExpense} pending={grandPending} />
+          <p className={`text-center text-[12px] font-semibold mt-2 ${grandRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+            {grandRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(grandRemaining))}
+          </p>
+          <div className="border-t border-[#F0ECE1] mt-3 pt-3">
+            <BudgetAmountAdjuster amount={grandBudget} adjustments={grandAdjustments} onAdjust={(delta, notes) => onAddAdjustment(null, delta, notes)} onOverwrite={onUpdateMainBudget} size="text-[17px]" />
+          </div>
+        </div>
 
-            {addingCategory ? (
-              <div className="bg-white rounded-2xl border-2 border-[#B9924F] p-4 flex gap-2 items-end">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Category Name</label>
-                  <input autoFocus value={newCatName} onChange={(e) => setNewCatName(e.target.value)} className="input" placeholder="e.g. Packaging" />
-                </div>
-                <div style={{ width: "140px" }}>
-                  <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Budget ($)</label>
-                  <input value={newCatBudget} onChange={(e) => setNewCatBudget(e.target.value)} className="input" placeholder="0.00" />
-                </div>
-                <button
-                  onClick={() => { onAddCategory(newCatName, newCatBudget); setNewCatName(""); setNewCatBudget(""); setAddingCategory(false); }}
-                  className="text-white rounded-lg px-4 py-2.5 text-[13px] font-medium shrink-0"
-                  style={{ backgroundColor: "#B9924F" }}
-                >
-                  Add
-                </button>
-                <button onClick={() => setAddingCategory(false)} className="text-[#5B564C] border border-[#E3DDCC] rounded-lg px-4 py-2.5 text-[13px] shrink-0 hover:bg-[#FAF8F3] transition">
-                  Cancel
-                </button>
+        {/* Main content — Overview grid, or the active budget's detail */}
+        <div className="flex-1 min-w-0 space-y-5">
+          {addingCategory && (
+            <div className="bg-white rounded-2xl border-2 border-[#B9924F] p-4 flex gap-2 items-end">
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Budget Name</label>
+                <input autoFocus value={newCatName} onChange={(e) => setNewCatName(e.target.value)} className="input" placeholder="e.g. Packaging" />
               </div>
-            ) : (
-              <button onClick={() => setAddingCategory(true)} className="w-full border-2 border-dashed border-[#DDD6C4] rounded-2xl py-4 text-[#B9924F] font-medium text-[13px] hover:bg-white hover:border-[#B9924F] transition">
-                + Add Budget Category
+              <div style={{ width: "140px" }}>
+                <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Starting Budget ($)</label>
+                <input value={newCatBudget} onChange={(e) => setNewCatBudget(e.target.value)} className="input" placeholder="0.00" />
+              </div>
+              <button
+                onClick={() => { onAddCategory(newCatName, newCatBudget); setNewCatName(""); setNewCatBudget(""); setAddingCategory(false); setActiveTab("overview"); }}
+                className="text-white rounded-lg px-4 py-2.5 text-[13px] font-medium shrink-0"
+                style={{ backgroundColor: "#B9924F" }}
+              >
+                Add
               </button>
-            )}
+              <button onClick={() => setAddingCategory(false)} className="text-[#5B564C] border border-[#E3DDCC] rounded-lg px-4 py-2.5 text-[13px] shrink-0 hover:bg-[#FAF8F3] transition">
+                Cancel
+              </button>
+            </div>
+          )}
 
-            {categories.length === 0 && !addingCategory && (
-              <p className="text-center text-[13px] text-[#C1BBAA] py-6">No budget categories yet — add one above to get started.</p>
-            )}
-
-            {categories.length > 0 && (
+          {activeTab === "overview" ? (
+            categories.length === 0 ? (
+              <p className="text-center text-[13px] text-[#C1BBAA] py-6">No budgets yet — click "+ Add Budget" above to create your first one.</p>
+            ) : (
               <div className="grid grid-cols-2 gap-3">
-                {categories.map((cat) => {
-                  const calc = withEffectiveBudget(cat);
-                  const remaining = calc.effectiveBudget - calc.spend - calc.borrow - calc.pending;
+                {categoryCalcs.map(({ cat, expense, pending }) => {
+                  const remaining = parseFloat(cat.budgetAmount || 0) - expense - pending;
+                  const inc = isCategoryIncluded(cat);
                   return (
-                    <button key={cat.id} onClick={() => setActiveTab(cat.id)} className="text-left bg-white rounded-xl border border-[#EAE5D9] p-4 hover:border-[#B9924F] transition">
-                      <div className="flex items-center justify-between mb-1.5">
+                    <div key={cat.id} onClick={() => setActiveTab(cat.id)} className={`text-left bg-white rounded-xl border border-[#EAE5D9] p-4 hover:border-[#B9924F] transition cursor-pointer ${inc ? "" : "opacity-50"}`}>
+                      <div className="flex items-center justify-between mb-1.5 gap-2">
                         <p className="text-[13px] font-semibold text-[#3F3B34] truncate">{cat.name || "Untitled"}</p>
-                        <p className="text-[12px] text-[#8A8377] tabular-nums shrink-0">${money(calc.effectiveBudget)}</p>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <p className="text-[12px] text-[#8A8377] tabular-nums">${money(cat.budgetAmount)}</p>
+                          <span onClick={(e) => e.stopPropagation()}>
+                            <ToggleSwitch on={inc} onChange={() => onUpdateCategory(cat.id, "included", !inc)} title="Include or exclude from the Grand Budget's totals" />
+                          </span>
+                        </div>
                       </div>
-                      <BudgetBar budgetAmount={calc.effectiveBudget} spend={calc.spend} borrow={calc.borrow} pending={calc.pending} />
+                      <BudgetBar budgetAmount={cat.budgetAmount} expenditure={expense} pending={pending} />
                       <p className={`text-[11px] font-medium mt-1.5 ${remaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
                         {remaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(remaining))}
                       </p>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
-            )}
-          </>
-        ) : activeCategory ? (
-          <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5">
-            <div className="flex items-center justify-between mb-2.5 gap-3">
-              <input
-                value={activeCategory.name}
-                onChange={(e) => onUpdateCategory(activeCategory.id, "name", e.target.value)}
-                className="text-[18px] font-semibold bg-transparent outline-none border-b border-transparent focus:border-[#E3DDCC] min-w-0 flex-1"
-              />
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="text-[12px] text-[#8A8377]">Starting Budget $</span>
-                <input
-                  value={activeCategory.budgetAmount}
-                  onChange={(e) => onUpdateCategory(activeCategory.id, "budgetAmount", e.target.value)}
-                  className="w-24 text-[13px] border border-[#E3DDCC] rounded-md px-2 py-1 text-right tabular-nums outline-none focus:border-[#B9924F]"
-                />
-                <button onClick={() => { onDeleteCategory(activeCategory.id); setActiveTab("overview"); }} className="text-[#C1BBAA] hover:text-red-400">
+            )
+          ) : activeCategory ? (
+            <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5">
+              <div className="flex items-center justify-between mb-3 gap-3">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <input
+                    value={activeCategory.name}
+                    onChange={(e) => onUpdateCategory(activeCategory.id, "name", e.target.value)}
+                    className="text-[18px] font-semibold bg-transparent outline-none border-b border-transparent focus:border-[#E3DDCC] min-w-0 flex-1"
+                  />
+                  <ToggleSwitch
+                    on={isCategoryIncluded(activeCategory)}
+                    onChange={() => onUpdateCategory(activeCategory.id, "included", !isCategoryIncluded(activeCategory))}
+                    title="Include or exclude this whole budget from the Grand Budget's totals"
+                  />
+                </div>
+                <button onClick={() => { onDeleteCategory(activeCategory.id); setActiveTab("overview"); }} className="text-[#C1BBAA] hover:text-red-400 shrink-0">
                   <Trash2 size={14} />
                 </button>
               </div>
-            </div>
 
-            <div className="flex items-center gap-6 mb-4">
-              <BudgetWheel budgetAmount={activeCalc.effectiveBudget} spend={activeCalc.spend} borrow={activeCalc.borrow} pending={activeCalc.pending} />
-              <div className="flex-1">
-                <BudgetBar budgetAmount={activeCalc.effectiveBudget} spend={activeCalc.spend} borrow={activeCalc.borrow} pending={activeCalc.pending} big />
-                <Legend />
-                <p className={`text-center text-[13px] font-semibold mt-2 ${activeRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
-                  {activeRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(activeRemaining))}
-                </p>
+              <div className="grid items-center mb-4" style={{ gridTemplateColumns: "104px 1fr 104px" }}>
+                <div className="flex justify-center">
+                  <BudgetWheel budgetAmount={activeBudget} expenditure={activeCalc.expense} pending={activeCalc.pending} />
+                </div>
+                <div className="px-2">
+                  <BudgetBar budgetAmount={activeBudget} expenditure={activeCalc.expense} pending={activeCalc.pending} big />
+                  <div className="flex items-center justify-center gap-4 text-[11px] mt-2">
+                    <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#B9924F" }} />Expense</span>
+                    <span className="flex items-center gap-1.5 text-[#5B564C]"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "#ACA692" }} />Estimate</span>
+                  </div>
+                  <p className={`text-center text-[13px] font-semibold mt-2 ${activeRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+                    {activeRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(activeRemaining))}
+                  </p>
+                </div>
+                <div className="flex justify-center">
+                  <BudgetAmountAdjuster amount={activeBudget} adjustments={activeAdjustments} onAdjust={(delta, notes) => onAddAdjustment(activeCategory.id, delta, notes)} onOverwrite={(v) => onUpdateCategory(activeCategory.id, "budgetAmount", v)} size="text-[16px]" />
+                </div>
+              </div>
+
+              <div className="mt-3">
+                {renderTxColumns(activeCalc.txs)}
               </div>
             </div>
-
-            {renderTxColumns(activeCalc.txs)}
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
+
+
 
 
 
@@ -3242,7 +3506,7 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-[#EAE5D9] shrink-0">
-          <h3 className="text-xl font-medium text-[#242320]">Library</h3>
+          <h3 className="text-2xl font-semibold text-[#242320] tracking-tight">Library</h3>
           <div className="flex items-center gap-2">
             {libraryTab === "Media" && (
               <button type="button" onClick={() => setTrashOpen(true)}
@@ -4135,11 +4399,263 @@ function PdfJsViewer({ src }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Inventory Summary Modal — brand filters + bulk Qty on Hand editor
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk Add/Edit — a spreadsheet-style way to create or update many products at
+// once, limited to their basic fields (name, brand, description, wholesale,
+// retail, default qty, qty on hand). Anything beyond that (sizes/shades,
+// media, Shopify, ingredients, etc.) still needs the regular product editor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk Edit — a spreadsheet-style way to create or update many products at
+// once, in one unified table, limited to their basic fields (name, brand,
+// category, description, wholesale, retail, default qty, qty on hand).
+// Anything beyond that (sizes/shades, media, ingredients, Shopify, etc.)
+// still needs the regular product editor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSaveEdits, onClose }) {
+  const blankRow = () => ({
+    rowId: Date.now().toString(36) + Math.random().toString(36).slice(2),
+    isNew: true,
+    name: "", brand: "", category: "", description: "", wholesale: "", retail: "", defaultQty: "", qtyOnHand: "",
+  });
+
+  const toRow = (p) => {
+    const base = (p.sizes || [])[0] || {};
+    return {
+      rowId: p.id, isNew: false, id: p.id,
+      name: p.name || "", brand: p.brand || "", category: p.category || "", description: p.description || "",
+      wholesale: base.wholesale || "", retail: base.retail || "", defaultQty: base.defaultQty || "", qtyOnHand: base.qtyOnHand || "",
+    };
+  };
+
+  const [rows, setRows] = useState([...products.map(toRow), blankRow(), blankRow(), blankRow()]);
+  const [filterBrand, setFilterBrand] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [printPromptOpen, setPrintPromptOpen] = useState(false);
+  const [printTimestamp, setPrintTimestamp] = useState(false);
+  const [printTitle, setPrintTitle] = useState("Bulk Edit");
+  const [confirmedPrintTitle, setConfirmedPrintTitle] = useState("");
+  const [confirmedPrintTimestamp, setConfirmedPrintTimestamp] = useState(false);
+
+  const updateRow = (rowId, field, value) => {
+    setRows((prev) => prev.map((r) => (r.rowId === rowId ? { ...r, [field]: value } : r)));
+  };
+  const removeRow = (rowId) => setRows((prev) => prev.filter((r) => r.rowId !== rowId));
+  const addMoreRows = (n) => setRows((prev) => [...prev, ...Array.from({ length: n }, blankRow)]);
+
+  const distinctBrands = [...new Set(products.map((p) => p.brand).filter(Boolean))];
+  const distinctCats = [...new Set(products.map((p) => p.category).filter(Boolean))];
+
+  const visibleRows = rows.filter((r) => {
+    if (r.isNew) return true; // new/blank rows always show, regardless of filter
+    if (filterBrand && r.brand !== filterBrand) return false;
+    if (filterCategory && r.category !== filterCategory) return false;
+    return true;
+  });
+
+  const saveAll = () => {
+    const newRows = rows.filter((r) => r.isNew && r.name.trim());
+    const existingRows = rows.filter((r) => !r.isNew);
+
+    if (newRows.length > 0) {
+      const newProducts = newRows.map((r) => ({
+        id: Date.now().toString() + Math.random().toString(36).slice(2),
+        name: r.name.trim(),
+        description: r.description || "",
+        brand: r.brand || "",
+        category: r.category || "",
+        additionalInfo: "",
+        shopifyHandle: "",
+        images: [],
+        isActive: true,
+        sizes: [
+          {
+            id: Math.random().toString(36).slice(2),
+            sizeType: "size", size: "", sku: "",
+            wholesale: r.wholesale || "", retail: r.retail || "",
+            volumeMl: "", volumeOz: "",
+            qtyOnHand: r.qtyOnHand || "", qtyAvailable: "", defaultQty: r.defaultQty || "",
+            ingredients: "", linkedImageIds: [],
+          },
+        ],
+      }));
+      onSaveNew(newProducts);
+    }
+
+    if (existingRows.length > 0) {
+      const updated = existingRows.map((r) => {
+        const original = products.find((p) => p.id === r.id);
+        if (!original) return null;
+        const baseSize = (original.sizes || [])[0];
+        const newSizes = baseSize
+          ? original.sizes.map((s, i) => (i === 0 ? { ...s, wholesale: r.wholesale, retail: r.retail, defaultQty: r.defaultQty, qtyOnHand: r.qtyOnHand } : s))
+          : [
+              {
+                id: Math.random().toString(36).slice(2),
+                sizeType: "size", size: "", sku: "",
+                wholesale: r.wholesale || "", retail: r.retail || "",
+                volumeMl: "", volumeOz: "",
+                qtyOnHand: r.qtyOnHand || "", qtyAvailable: "", defaultQty: r.defaultQty || "",
+                ingredients: "", linkedImageIds: [],
+              },
+            ];
+        return { ...original, name: r.name, brand: r.brand, category: r.category, description: r.description, sizes: newSizes };
+      }).filter(Boolean);
+      onSaveEdits(updated);
+    }
+
+    // Clear out spent new rows, keep a few fresh blanks, refresh existing rows from what was just saved
+    setRows([...existingRows, blankRow(), blankRow(), blankRow()]);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2000);
+  };
+
+  const colTemplate = "1.2fr 0.9fr 0.9fr 1.3fr 70px 70px 70px 70px 28px";
+
+  const openPrintPrompt = () => setPrintPromptOpen(true);
+  const confirmPrint = () => {
+    setConfirmedPrintTitle(printTitle.trim() || "Bulk Edit");
+    setConfirmedPrintTimestamp(printTimestamp);
+    setPrintPromptOpen(false);
+    setTimeout(() => window.print(), 50);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-start justify-center z-50 overflow-y-auto py-6 px-4">
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          #bulk-edit-print, #bulk-edit-print * { visibility: visible; }
+          #bulk-edit-print { position: absolute; left: 0; top: 0; width: 100%; max-height: none !important; overflow: visible !important; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="bg-white rounded-2xl w-full my-auto flex flex-col overflow-hidden" style={{ maxWidth: "1240px", maxHeight: "88vh" }}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#EAE5D9] shrink-0 no-print">
+          <h3 className="text-2xl font-semibold text-[#242320] tracking-tight">Bulk Edit</h3>
+          <div className="flex items-center gap-2">
+            <button onClick={openPrintPrompt} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">Print</button>
+            <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={18} /></button>
+          </div>
+        </div>
+
+        {printPromptOpen && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setPrintPromptOpen(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-[15px] font-semibold text-[#242320] mb-3">Print Bulk Edit</h3>
+              <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Document Title</label>
+              <input
+                autoFocus
+                value={printTitle}
+                onChange={(e) => setPrintTitle(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                className="input mb-3"
+                placeholder="Bulk Edit"
+              />
+              <label className="flex items-center gap-2 text-[12.5px] text-[#5B564C] cursor-pointer mb-4">
+                <input type="checkbox" checked={printTimestamp} onChange={(e) => setPrintTimestamp(e.target.checked)} />
+                Include a timestamp
+              </label>
+              <div className="flex gap-2">
+                <button onClick={() => setPrintPromptOpen(false)} className="flex-1 text-[13px] font-medium text-[#5B564C] border border-[#E3DDCC] rounded-full py-2 hover:bg-[#FAF8F3] transition">
+                  Cancel
+                </button>
+                <button onClick={confirmPrint} className="flex-1 text-[13px] font-medium text-white rounded-full py-2 transition" style={{ backgroundColor: "#B9924F" }}>
+                  Print
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div id="bulk-edit-print" className="overflow-y-auto flex-1 px-6 py-4">
+          {confirmedPrintTitle && (
+            <div className="mb-3">
+              <h2 className="text-[18px] font-medium text-[#242320]">{confirmedPrintTitle}</h2>
+              {confirmedPrintTimestamp && <p className="text-[10px] text-[#8A8377] mt-0.5">Printed {new Date().toLocaleString()}</p>}
+            </div>
+          )}
+
+        <div className="flex items-center gap-2 pb-3 no-print">
+          <span className="text-[10px] font-bold tracking-wider uppercase text-[#8A8377] mr-1">Filter</span>
+          <select value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)} className="text-[12px] border border-[#E3DDCC] rounded-lg px-2 py-1 outline-none focus:border-[#B9924F]">
+            <option value="">Brand</option>
+            {distinctBrands.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="text-[12px] border border-[#E3DDCC] rounded-lg px-2 py-1 outline-none focus:border-[#B9924F]">
+            <option value="">Category</option>
+            {distinctCats.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          {(filterBrand || filterCategory) && (
+            <button onClick={() => { setFilterBrand(""); setFilterCategory(""); }} className="text-[11px] text-[#C1BBAA] hover:text-[#8A8377]">
+              Clear
+            </button>
+          )}
+        </div>
+
+        <div className="no-print">
+          <p className="text-[11px] text-[#8A8377] mb-3">
+            Only basic fields are editable here. New rows (blank, at the bottom) become new products when saved; existing rows update in place.
+            Sizes/shades, media, ingredients, and Shopify details still need the regular product editor.
+          </p>
+        </div>
+
+          <div className="grid gap-2 px-2 pb-2 text-[9px] font-bold tracking-wider uppercase text-[#8A8377]" style={{ gridTemplateColumns: colTemplate }}>
+            <span>Name</span><span>Brand</span><span>Category</span><span>Description</span><span>Wholesale</span><span>Retail</span><span>Default</span><span>On Hand</span><span></span>
+          </div>
+
+          <div className="space-y-1.5">
+            {visibleRows.map((r) => (
+              <div key={r.rowId} className={`grid gap-2 items-center rounded-lg ${r.isNew ? "bg-[#FAF8F3] py-1" : ""}`} style={{ gridTemplateColumns: colTemplate }}>
+                <input value={r.name} onChange={(e) => updateRow(r.rowId, "name", e.target.value)} className="input input-sm" placeholder={r.isNew ? "New product name" : ""} />
+                <Combobox value={r.brand} onChange={(v) => updateRow(r.rowId, "brand", v)} options={memory.brand || []} placeholder="Brand" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("brand", v)} />
+                <Combobox value={r.category} onChange={(v) => updateRow(r.rowId, "category", v)} options={memory.category || []} placeholder="Category" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("category", v)} />
+                <input value={r.description} onChange={(e) => updateRow(r.rowId, "description", e.target.value)} className="input input-sm" placeholder="Description" />
+                <input value={r.wholesale} onChange={(e) => updateRow(r.rowId, "wholesale", e.target.value)} className="input input-sm" placeholder="0.00" />
+                <input value={r.retail} onChange={(e) => updateRow(r.rowId, "retail", e.target.value)} className="input input-sm" placeholder="0.00" />
+                <input value={r.defaultQty} onChange={(e) => updateRow(r.rowId, "defaultQty", e.target.value)} className="input input-sm" placeholder="0" />
+                <input value={r.qtyOnHand} onChange={(e) => updateRow(r.rowId, "qtyOnHand", e.target.value)} className="input input-sm" placeholder="0" />
+                {r.isNew ? (
+                  <button onClick={() => removeRow(r.rowId)} className="text-[#C1BBAA] hover:text-red-400 justify-self-center"><X size={13} /></button>
+                ) : <span />}
+              </div>
+            ))}
+          </div>
+          <button onClick={() => addMoreRows(3)} className="text-[12px] font-medium text-[#B9924F] hover:text-[#8F6B2E] mt-2">
+            + Add 3 more rows
+          </button>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-6 py-3.5 border-t border-[#EAE5D9] shrink-0">
+          {savedFlash && <span className="text-[12px] text-[#5B8A6E] mr-auto">Saved ✓</span>}
+          <button onClick={onClose} className="text-[13px] font-medium text-[#5B564C] rounded-full px-4 py-2 hover:bg-[#FAF8F3] transition">
+            Close
+          </button>
+          <button onClick={saveAll} className="text-[13px] font-medium rounded-full px-4 py-2 border transition" style={{ borderColor: "#B9924F", color: "#B9924F" }}>
+            Save All
+          </button>
+          <button onClick={() => { saveAll(); onClose(); }} className="text-[13px] font-medium text-white rounded-full px-4 py-2 transition" style={{ backgroundColor: "#B9924F" }}>
+            Save and Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, brandCounts, inventorySummary, onInstantUpdate, inventoryHistory, onClose }) {
   const [qtyEdits, setQtyEdits] = useState({});
   const [defEdits, setDefEdits] = useState({});
   const [historyOpen, setHistoryOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [printPromptOpen, setPrintPromptOpen] = useState(false);
+  const [printTimestamp, setPrintTimestamp] = useState(false);
+  const [printTitle, setPrintTitle] = useState("Inventory Summary");
+  const [confirmedPrintTitle, setConfirmedPrintTitle] = useState("");
+  const [confirmedPrintTimestamp, setConfirmedPrintTimestamp] = useState(false);
 
   const allRows = products.flatMap((p) =>
     (p.sizes || []).map((s, si) => {
@@ -4157,12 +4673,15 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
     const q = search.trim().toLowerCase();
     return (r.p.name || "").toLowerCase().includes(q)
       || (r.p.description || "").toLowerCase().includes(q)
+      || (r.p.brand || "").toLowerCase().includes(q)
+      || (r.p.category || "").toLowerCase().includes(q)
       || (r.s.size || "").toLowerCase().includes(q);
   });
 
   const totalValueAvail = rows.reduce((a, r) => a + r.valueAvail, 0);
   const totalValueDef   = rows.reduce((a, r) => a + r.valueDef, 0);
   const totalDiff       = rows.reduce((a, r) => a + r.diff, 0);
+  const totalOnHand     = rows.reduce((a, r) => a + parseFloat(r.s.qtyOnHand || 0), 0);
 
   // Applying always logs to history — instantInventoryUpdate records the change automatically.
   const applyQtyEdits = () => {
@@ -4181,11 +4700,24 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
     setDefEdits({});
   };
 
-  // Product | Description | Brand | Size/Shade | Qty+Value Available | Qty+Value Default(editable) | Difference | Qty on Hand(editable)
-  const col = "minmax(56px,1fr) minmax(56px,1fr) minmax(56px,1fr) minmax(56px,1fr) 78px 78px 76px 64px";
-  const minW = "620px";
+  const applyAll = () => {
+    applyDefEdits();
+    applyQtyEdits();
+  };
+
+  const openPrintPrompt = () => setPrintPromptOpen(true);
+  const confirmPrint = () => {
+    setConfirmedPrintTitle(printTitle.trim() || "Inventory Summary");
+    setConfirmedPrintTimestamp(printTimestamp);
+    setPrintPromptOpen(false);
+    setTimeout(() => window.print(), 50);
+  };
+
+  // Product | Description | Brand | Category | Size/Shade | Qty Available | Qty Default | Difference | Qty on Hand
+  const col = "minmax(84px,1.15fr) minmax(84px,1.1fr) minmax(64px,0.8fr) minmax(64px,0.8fr) minmax(56px,0.75fr) 128px 128px 76px 64px";
+  const minW = "980px";
   const hdrCell = (label, amber) => (
-    <span className={`text-[9px] font-bold tracking-wider uppercase ${amber ? "text-[#B9924F]" : "text-[#8A8377]"}`}>{label}</span>
+    <span className={`text-[9px] font-bold tracking-wider uppercase text-center ${amber ? "text-[#B9924F]" : "text-[#8A8377]"}`}>{label}</span>
   );
 
   return (
@@ -4198,37 +4730,73 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
           .no-print { display: none !important; }
         }
       `}</style>
-      <div className="bg-white rounded-2xl w-full my-auto flex flex-col overflow-hidden" style={{ maxWidth: "820px", maxHeight: "92vh" }}>
+      <div className="bg-white rounded-2xl w-full my-auto flex flex-col overflow-hidden" style={{ maxWidth: "1240px", maxHeight: "92vh" }}>
 
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#EAE5D9] shrink-0 no-print">
-          <h3 className="text-xl font-medium text-[#242320]">Inventory Summary</h3>
-          <div className="flex items-center gap-2">
-            <button onClick={() => window.print()} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">Print</button>
+        {/* Title — Search — Print/History/Close, all in one row */}
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-[#EAE5D9] shrink-0 no-print">
+          <h3 className="text-2xl font-semibold text-[#242320] tracking-tight shrink-0">Inventory Summary</h3>
+          <div className="flex items-center gap-2 bg-[#FAF8F3] border border-[#E3DDCC] rounded-lg px-3 py-2 min-w-0" style={{ width: "320px" }}>
+            <Search size={13} className="text-[#C1BBAA] shrink-0" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by product, description, brand, category, size, or shade…"
+              className="flex-1 min-w-0 text-[13px] outline-none bg-transparent"
+            />
+            {search && <span className="text-[10px] text-[#C1BBAA] shrink-0">{rows.length} match{rows.length !== 1 ? "es" : ""}</span>}
+          </div>
+          <div className="flex-1" />
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={openPrintPrompt} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">Print</button>
             <button onClick={() => setHistoryOpen(true)} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">History</button>
             <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={18} /></button>
           </div>
         </div>
         {historyOpen && <InventoryHistoryModal history={inventoryHistory || []} onClose={() => setHistoryOpen(false)} />}
 
-        <div id="inv-summary-print" className="overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
-          <div className="px-6 pt-3.5 pb-3 border-b border-[#F0ECE1] no-print">
-            <div className="flex items-center gap-2 bg-[#FAF8F3] border border-[#E3DDCC] rounded-lg px-3 py-2">
-              <Search size={13} className="text-[#C1BBAA]" />
+        {printPromptOpen && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setPrintPromptOpen(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-[15px] font-semibold text-[#242320] mb-3">Print Inventory Summary</h3>
+              <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Document Title</label>
               <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by product, description, size, or shade…"
-                className="flex-1 text-[13px] outline-none bg-transparent"
+                autoFocus
+                value={printTitle}
+                onChange={(e) => setPrintTitle(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                className="input mb-3"
+                placeholder="Inventory Summary"
               />
-              {search && <span className="text-[10px] text-[#C1BBAA] shrink-0">{rows.length} match{rows.length !== 1 ? "es" : ""}</span>}
+              <label className="flex items-center gap-2 text-[12.5px] text-[#5B564C] cursor-pointer mb-4">
+                <input type="checkbox" checked={printTimestamp} onChange={(e) => setPrintTimestamp(e.target.checked)} />
+                Include a timestamp
+              </label>
+              <div className="flex gap-2">
+                <button onClick={() => setPrintPromptOpen(false)} className="flex-1 text-[13px] font-medium text-[#5B564C] border border-[#E3DDCC] rounded-full py-2 hover:bg-[#FAF8F3] transition">
+                  Cancel
+                </button>
+                <button onClick={confirmPrint} className="flex-1 text-[13px] font-medium text-white rounded-full py-2 transition" style={{ backgroundColor: "#B9924F" }}>
+                  Print
+                </button>
+              </div>
             </div>
           </div>
+        )}
 
+        <div id="inv-summary-print" className="overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
+          {confirmedPrintTitle && (
+            <div className="px-6 pt-4">
+              <h2 className="text-[18px] font-medium text-[#242320]">{confirmedPrintTitle}</h2>
+              {confirmedPrintTimestamp && <p className="text-[10px] text-[#8A8377] mt-0.5">Printed {new Date().toLocaleString()}</p>}
+            </div>
+          )}
           <div className="overflow-x-auto">
             {/* Column headers */}
             <div className="grid bg-[#FAF8F3] border-b border-[#E9E4D8] px-4 py-2 sticky top-0 z-10 items-center" style={{ gridTemplateColumns: col, minWidth: minW }}>
-              {hdrCell("Product")} {hdrCell("Description")}
+              <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377]">Product</span>
+              <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377]">Description</span>
               <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377]">Brand</span>
+              <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377]">Category</span>
               <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377]">Size/Shade</span>
               <span className="text-[9px] font-bold tracking-wider uppercase text-[#8A8377] text-center">Qty Available</span>
               {hdrCell("Qty Default", true)}
@@ -4244,34 +4812,41 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
               return (
                 <div key={key} className={`grid items-center px-4 py-2 border-b border-[#F4F1EA] last:border-0 transition-colors ${hasQtyEdit || hasDefEdit ? "bg-[#FEFBF4]" : "hover:bg-[#FAFAF8]"}`} style={{ gridTemplateColumns: col, minWidth: minW }}>
                   {/* Product */}
-                  <div className="min-w-0 pr-1">{si === 0 ? <p className="text-[11px] text-[#242320] truncate">{p.name}</p> : <p className="text-[10px] text-[#C1BBAA]">↳</p>}</div>
+                  <div className="min-w-0 pr-1">{si === 0 ? <p className="text-[11px] text-[#242320] truncate" title={p.name}>{p.name}</p> : <p className="text-[10px] text-[#C1BBAA]">↳</p>}</div>
                   {/* Description */}
                   <p className="text-[10px] text-[#8A8377] truncate pr-1" title={p.description}>{p.description || <span className="text-[#D0CAB8]">—</span>}</p>
                   {/* Brand — left aligned */}
                   <p className="text-[10px] text-[#B9924F] truncate font-medium">{si === 0 ? (p.brand || "—") : ""}</p>
+                  {/* Category — left aligned */}
+                  <p className="text-[10px] text-[#5B564C] truncate">{si === 0 ? (p.category || "—") : ""}</p>
                   {/* Size/Shade — left aligned */}
                   <p className="text-[10px] text-[#5B564C] truncate">{s.size || "—"}</p>
-                  {/* Qty Available + Value Available — combined, read-only, centered */}
-                  <div className="text-center">
-                    <p className="text-[11px] text-[#3F3B34] tabular-nums">{avail || <span className="text-[#C1BBAA]">—</span>}</p>
-                    <p className="text-[9px] text-[#8A8377] tabular-nums">${money(valueAvail)}</p>
+                  {/* Qty Available — box (same size as Qty Default's input) + value, matching layout exactly */}
+                  <div className="flex items-center justify-start gap-2 pl-4">
+                    <span
+                      className="text-center text-[11px] border rounded-md tabular-nums border-[#E3DDCC] bg-[#FAF8F3] text-[#3F3B34]"
+                      style={{ width: "42px", padding: "2px 3px", display: "inline-block" }}
+                    >
+                      {avail || 0}
+                    </span>
+                    <span className="text-[10px] text-[#8A8377] tabular-nums whitespace-nowrap">${money(valueAvail)}</span>
                   </div>
-                  {/* Qty Default + Value Default — combined, editable, centered */}
-                  <div className="flex flex-col items-center">
+                  {/* Qty Default — qty (editable) and $ value together, one line */}
+                  <div className="flex items-center justify-start gap-2 pl-4">
                     <input type="number" min="0"
                       value={defEdits[key] !== undefined ? defEdits[key] : (s.defaultQty || "")}
                       onChange={(e) => { const v = e.target.value; setDefEdits((prev) => v === "" ? (({ [key]: _, ...r }) => r)(prev) : { ...prev, [key]: v }); }}
                       placeholder={s.defaultQty || "0"}
                       className={`text-center text-[11px] border rounded-md outline-none transition tabular-nums ${hasDefEdit ? "border-[#B9924F] bg-white" : "border-[#E3DDCC] bg-[#FAF8F3] focus:border-[#B9924F] focus:bg-white"}`}
-                      style={{ width: "48px", padding: "2px 3px" }}
+                      style={{ width: "42px", padding: "2px 3px" }}
                     />
-                    <p className="text-[9px] text-[#8A8377] tabular-nums mt-0.5">${money(valueDef)}</p>
+                    <span className="text-[10px] text-[#8A8377] tabular-nums whitespace-nowrap">${money(valueDef)}</span>
                   </div>
                   {/* Difference — read-only, centered */}
                   <p className={`text-[11px] font-medium text-center tabular-nums ${diff > 0 ? "text-red-400" : diff < 0 ? "text-[#5B8A6E]" : "text-[#C1BBAA]"}`}>
                     {diff !== 0 ? `${diff > 0 ? "−" : "+"}$${money(Math.abs(diff))}` : "—"}
                   </p>
-                  {/* Qty on Hand — editable (merged display+edit), centered */}
+                  {/* Qty on Hand — editable, centered */}
                   <div className="flex justify-center">
                     <input type="number" min="0"
                       value={qtyEdits[key] !== undefined ? qtyEdits[key] : (s.qtyOnHand || "")}
@@ -4285,41 +4860,65 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
               );
             })}
 
-            {/* Totals + Apply buttons */}
+            {/* Apply buttons — each sitting directly under its own column, using the same grid template */}
             {rows.length > 0 && (
-              <div className="grid items-center px-4 py-3 bg-[#FAF8F3] border-t-2 border-[#E9E4D8]" style={{ gridTemplateColumns: col, minWidth: minW }}>
-                <span className="text-[9px] font-bold tracking-wider text-[#8A8377] uppercase col-span-4">Totals</span>
-                {/* Qty+Value Available total */}
-                <p className="text-[10px] font-bold text-[#3F3B34] text-center tabular-nums">${money(totalValueAvail)}</p>
-                {/* Qty+Value Default total + Apply */}
-                <div className="flex flex-col items-center gap-1">
-                  <button onClick={applyDefEdits} disabled={!Object.keys(defEdits).length}
-                    className={`text-[9px] font-semibold rounded-md px-2 py-1 transition ${Object.keys(defEdits).length ? "text-white" : "text-[#C1BBAA] border border-[#E3DDCC] cursor-default"}`}
-                    style={Object.keys(defEdits).length ? { backgroundColor: "#B9924F" } : {}}>
-                    Apply
-                  </button>
-                  <p className="text-[9px] font-bold text-[#3F3B34] tabular-nums">${money(totalValueDef)}</p>
+              <div className="bg-[#FAF8F3] border-t-2 border-[#E9E4D8]">
+                <div className="grid items-center px-4 pt-2.5 no-print" style={{ gridTemplateColumns: col, minWidth: minW }}>
+                  <span /><span /><span /><span /><span />
+                  <span />
+                  <div className="flex justify-start pl-4">
+                    <button onClick={applyDefEdits} disabled={!Object.keys(defEdits).length}
+                      className={`text-[10px] font-semibold rounded-md px-3 py-1.5 transition ${Object.keys(defEdits).length ? "text-white" : "text-[#C1BBAA] border border-[#E3DDCC] cursor-default"}`}
+                      style={Object.keys(defEdits).length ? { backgroundColor: "#B9924F" } : {}}>
+                      Apply
+                    </button>
+                  </div>
+                  <span />
+                  <div className="flex justify-start pl-4">
+                    <button onClick={applyQtyEdits} disabled={!Object.keys(qtyEdits).length}
+                      className={`text-[10px] font-semibold rounded-md px-3 py-1.5 transition ${Object.keys(qtyEdits).length ? "text-white" : "text-[#C1BBAA] border border-[#E3DDCC] cursor-default"}`}
+                      style={Object.keys(qtyEdits).length ? { backgroundColor: "#B9924F" } : {}}>
+                      Apply
+                    </button>
+                  </div>
                 </div>
-                {/* Difference total */}
-                <span className={`text-[11px] font-bold text-center tabular-nums ${totalDiff > 0 ? "text-red-400" : "text-[#5B8A6E]"}`}>
-                  {totalDiff !== 0 ? `${totalDiff > 0 ? "−" : "+"}$${money(Math.abs(totalDiff))}` : "—"}
-                </span>
-                {/* Qty on Hand Apply */}
-                <div className="flex justify-center">
-                  <button onClick={applyQtyEdits} disabled={!Object.keys(qtyEdits).length}
-                    className={`text-[9px] font-semibold rounded-md px-2 py-1 transition ${Object.keys(qtyEdits).length ? "text-white" : "text-[#C1BBAA] border border-[#E3DDCC] cursor-default"}`}
-                    style={Object.keys(qtyEdits).length ? { backgroundColor: "#B9924F" } : {}}>
-                    Apply
-                  </button>
+                {/* Totals — one line, each number sitting under its own column */}
+                <div className="grid items-center px-4 py-2.5" style={{ gridTemplateColumns: col, minWidth: minW }}>
+                  <span className="text-[9px] font-bold tracking-wider text-[#8A8377] uppercase col-span-5">Totals</span>
+                  <div className="flex items-center justify-start gap-2 pl-4">
+                    <span style={{ width: "42px", display: "inline-block" }} />
+                    <span className="text-[11px] font-bold text-[#3F3B34] tabular-nums whitespace-nowrap">${money(totalValueAvail)}</span>
+                  </div>
+                  <div className="flex items-center justify-start gap-2 pl-4">
+                    <span style={{ width: "42px", display: "inline-block" }} />
+                    <span className="text-[11px] font-bold text-[#3F3B34] tabular-nums whitespace-nowrap">${money(totalValueDef)}</span>
+                  </div>
+                  <span className={`text-[11px] font-bold text-center tabular-nums ${totalDiff > 0 ? "text-red-400" : "text-[#5B8A6E]"}`}>
+                    {totalDiff !== 0 ? `${totalDiff > 0 ? "−" : "+"}$${money(Math.abs(totalDiff))}` : "—"}
+                  </span>
+                  <span className="text-[11px] font-bold text-[#3F3B34] text-center tabular-nums">{totalOnHand}</span>
                 </div>
               </div>
             )}
           </div>
         </div>
+
+        <div className="flex items-center justify-end gap-2 px-6 py-3.5 border-t border-[#EAE5D9] shrink-0 no-print">
+          <button onClick={onClose} className="text-[13px] font-medium text-[#5B564C] rounded-full px-4 py-2 hover:bg-[#FAF8F3] transition">
+            Cancel
+          </button>
+          <button onClick={applyAll} className="text-[13px] font-medium rounded-full px-4 py-2 border transition" style={{ borderColor: "#B9924F", color: "#B9924F" }}>
+            Save
+          </button>
+          <button onClick={() => { applyAll(); onClose(); }} className="text-[13px] font-medium text-white rounded-full px-4 py-2 transition" style={{ backgroundColor: "#B9924F" }}>
+            Save and Close
+          </button>
+        </div>
       </div>
     </div>
   );
 }
+
 
 function InventoryTabContent({ draft, updateSize, inventoryHistory }) {
   const [historyOpen, setHistoryOpen] = useState(false);
