@@ -106,6 +106,11 @@ const SplitIcon = makeIcon([
   el("path", { key: 2, d: "M15 6l3-3 3 3" }),
   el("path", { key: 3, d: "M6 21v-6" }),
 ]);
+const Printer = makeIcon([
+  el("polyline", { key: 1, points: "6 9 6 2 18 2 18 9" }),
+  el("path", { key: 2, d: "M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" }),
+  el("rect", { key: 3, x: 6, y: 14, width: 12, height: 8 }),
+]);
 
 // ---- Supabase setup: paste your real keys here ----
 const SUPABASE_URL = "https://tutctqcknozfffeydyih.supabase.co";
@@ -192,6 +197,7 @@ const BUDGET_CATEGORIES_KEY = "aster-budget-categories-v1";
 const BUDGET_TRANSACTIONS_KEY = "aster-budget-transactions-v1";
 const MAIN_BUDGET_KEY = "aster-main-budget-v1";
 const BUDGET_ADJUSTMENTS_KEY = "aster-budget-adjustments-v1";
+const BANK_ACCOUNTS_KEY = "aster-bank-accounts-v1";
 
 const TABS = ["Product", "Inventory", "Media", "Shopify"];
 
@@ -204,7 +210,7 @@ const ensureProtocol = (url) => {
 
 
 // Field-type buckets used to split the two exclusive history reports
-const PRODUCT_HISTORY_FIELDS = ["Product Name", "Description", "Shopify Handle", "Wholesale", "Retail", "Volume"];
+const PRODUCT_HISTORY_FIELDS = ["Product Name", "Description", "Shopify Handle", "Wholesale", "Retail", "Volume", "Ingredients", "Size Added", "Size Removed"];
 const INVENTORY_HISTORY_FIELDS = ["Qty on Hand", "Default"];
 
 const newSizeRow = (sizeType = "size") => ({
@@ -359,10 +365,15 @@ function ProductCatalogApp() {
   const [appSection, setAppSection] = useState("Products"); // top-level: "Products" | "Budget" — separate from the product-editing tabs
   const [mainBudgetAmount, setMainBudgetAmount] = useState(""); // the overall/main budget — its own independently-set number
   const [budgetAdjustments, setBudgetAdjustments] = useState([]); // [{ id, categoryId (null = Grand Budget), amount (signed), date, notes }]
+  const [bankAccounts, setBankAccounts] = useState([]); // [{ id, name }] — a budget category or transaction can optionally link to one
   const [budgetCategories, setBudgetCategories] = useState([]); // [{ id, name, budgetAmount }]
   const [budgetTransactions, setBudgetTransactions] = useState([]); // [{ id, categoryId, type: "estimate"|"expenditure", amount, description, date, notes, included, discrepancyNote, originalAmount, convertedFrom, convertedIntoId }]
   const [modalOpen, setModalOpen] = useState(false);
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [addingBrandInline, setAddingBrandInline] = useState(false);
+  const [newBrandInline, setNewBrandInline] = useState("");
+  const [addingCategoryInline, setAddingCategoryInline] = useState(false);
+  const [newCategoryInline, setNewCategoryInline] = useState("");
   const [pickingImages, setPickingImages] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -432,6 +443,10 @@ function ProductCatalogApp() {
       try {
         const ba = await window.storage.get(BUDGET_ADJUSTMENTS_KEY, false);
         if (ba && ba.value) setBudgetAdjustments(JSON.parse(ba.value));
+      } catch (e) {}
+      try {
+        const acc = await window.storage.get(BANK_ACCOUNTS_KEY, false);
+        if (acc && acc.value) setBankAccounts(JSON.parse(acc.value));
       } catch (e) {}
       try {
         const idx = await window.storage.get(MEDIA_INDEX_KEY, false);
@@ -543,24 +558,54 @@ function ProductCatalogApp() {
     });
   };
 
-  // Category management (gear icon → Manage Categories) — renaming/deleting
-  // updates the master list AND every product currently using that category.
-  const renameCategory = (oldName, newName) => {
+  // Menu management (gear icon → Manage Menus) — renaming/deleting updates
+  // the master list AND every product/media item currently using that value.
+  const renameMemoryValue = (field, oldName, newName) => {
     const trimmed = newName.trim();
     if (!trimmed || trimmed === oldName) return;
     setMemory((prev) => ({
       ...prev,
-      category: (prev.category || []).map((c) => (c === oldName ? trimmed : c)),
+      [field]: (prev[field] || []).map((c) => (c === oldName ? trimmed : c)),
     }));
-    setProducts((prev) => prev.map((p) => (p.category === oldName ? { ...p, category: trimmed } : p)));
-    setCategoryFilter((prev) => (prev === oldName ? trimmed : prev));
+    if (field === "category") {
+      setProducts((prev) => prev.map((p) => (p.category === oldName ? { ...p, category: trimmed } : p)));
+      setCategoryFilter((prev) => (prev === oldName ? trimmed : prev));
+    } else if (field === "brand") {
+      setProducts((prev) => prev.map((p) => (p.brand === oldName ? { ...p, brand: trimmed } : p)));
+    } else if (field === "type") {
+      setMediaIndex((prev) => prev.map((m) => (m.type === oldName ? { ...m, type: trimmed } : m)));
+    } else if (field === "source") {
+      setMediaIndex((prev) => prev.map((m) => (m.source === oldName ? { ...m, source: trimmed } : m)));
+    } else if (field === "size") {
+      setProducts((prev) => prev.map((p) => ({
+        ...p,
+        sizes: (p.sizes || []).map((s) => (s.size === oldName ? { ...s, size: trimmed } : s)),
+      })));
+    }
   };
 
-  const deleteCategoryFromMemory = (name) => {
-    setMemory((prev) => ({ ...prev, category: (prev.category || []).filter((c) => c !== name) }));
-    setProducts((prev) => prev.map((p) => (p.category === name ? { ...p, category: "" } : p)));
-    setCategoryFilter((prev) => (prev === name ? null : prev));
+  const deleteMemoryValue = (field, name) => {
+    setMemory((prev) => ({ ...prev, [field]: (prev[field] || []).filter((c) => c !== name) }));
+    if (field === "category") {
+      setProducts((prev) => prev.map((p) => (p.category === name ? { ...p, category: "" } : p)));
+      setCategoryFilter((prev) => (prev === name ? null : prev));
+    } else if (field === "brand") {
+      setProducts((prev) => prev.map((p) => (p.brand === name ? { ...p, brand: "" } : p)));
+    } else if (field === "type") {
+      setMediaIndex((prev) => prev.map((m) => (m.type === name ? { ...m, type: "" } : m)));
+    } else if (field === "source") {
+      setMediaIndex((prev) => prev.map((m) => (m.source === name ? { ...m, source: "" } : m)));
+    } else if (field === "size") {
+      setProducts((prev) => prev.map((p) => ({
+        ...p,
+        sizes: (p.sizes || []).map((s) => (s.size === name ? { ...s, size: "" } : s)),
+      })));
+    }
   };
+
+  // Kept for backward compatibility with any lingering references
+  const renameCategory = (oldName, newName) => renameMemoryValue("category", oldName, newName);
+  const deleteCategoryFromMemory = (name) => deleteMemoryValue("category", name);
 
   const kindFromMime = (mime) => {
     if (mime.startsWith("image/")) return "image";
@@ -730,6 +775,39 @@ function ProductCatalogApp() {
     persistBudgetAdjustments([entry, ...budgetAdjustments]);
   };
 
+  // Deleting an adjustment reverses its effect on the budget amount it applied
+  // to (undo semantics), then removes it from the log — otherwise the budget
+  // total and its history would silently disagree.
+  const deleteBudgetAdjustment = (id) => {
+    const adj = budgetAdjustments.find((a) => a.id === id);
+    if (!adj) return;
+    if (adj.categoryId === null) {
+      updateMainBudgetAmount(String(parseFloat(mainBudgetAmount || 0) - adj.amount));
+    } else {
+      const cat = budgetCategories.find((c) => c.id === adj.categoryId);
+      if (cat) updateBudgetCategory(adj.categoryId, "budgetAmount", String(parseFloat(cat.budgetAmount || 0) - adj.amount));
+    }
+    persistBudgetAdjustments(budgetAdjustments.filter((a) => a.id !== id));
+  };
+
+  const persistBankAccounts = (next) => {
+    setBankAccounts(next);
+    window.storage?.set(BANK_ACCOUNTS_KEY, JSON.stringify(next), false).catch(() => {});
+  };
+  const addBankAccount = (name) => {
+    if (!name.trim()) return;
+    persistBankAccounts([...bankAccounts, { id: Date.now().toString(36) + Math.random().toString(36).slice(2), name: name.trim() }]);
+  };
+  const renameBankAccount = (id, name) => {
+    if (!name.trim()) return;
+    persistBankAccounts(bankAccounts.map((a) => (a.id === id ? { ...a, name: name.trim() } : a)));
+  };
+  const deleteBankAccount = (id) => {
+    persistBankAccounts(bankAccounts.filter((a) => a.id !== id));
+    persistBudgetCategories(budgetCategories.map((c) => (c.accountId === id ? { ...c, accountId: null } : c)));
+    persistBudgetTransactions(budgetTransactions.map((t) => (t.accountId === id ? { ...t, accountId: null } : t)));
+  };
+
   // Undoes an Estimate→Expense conversion or split: deletes the resulting
   // Expense transaction and adds its amount back onto the original Estimate
   // (reactivating it if it had been fully consumed).
@@ -888,6 +966,40 @@ function ProductCatalogApp() {
     });
   };
 
+  // Lets a mistaken or typo'd entry be struck from the record — this is a
+  // pure log deletion (no value gets reversed), since a history entry never
+  // drove the product's actual field value in the first place.
+  const deleteInventoryHistoryEntry = (id) => {
+    setInventoryHistory((prev) => {
+      const updated = prev.filter((e) => e.id !== id);
+      window.storage?.set("aster-inv-history-v1", JSON.stringify(updated), false).catch(() => {});
+      return updated;
+    });
+  };
+
+  // Diffs an existing product's sizes against its updated version (used by
+  // Bulk Edit, which otherwise saves directly with no history at all).
+  // Wholesale/Retail only count as a change once a real prior value gets
+  // overwritten. Qty on Hand/Default always count, including the very first
+  // time a quantity is entered — those belong in the Inventory Summary's
+  // history and should always be findable there.
+  const recordSizeDiffs = (oldProduct, newProduct) => {
+    const oldBase = (oldProduct.sizes || [])[0] || {};
+    const newBase = (newProduct.sizes || [])[0] || {};
+    [["wholesale", "Wholesale"], ["retail", "Retail"]].forEach(([k, label]) => {
+      const oldV = oldBase[k] || "", newV = newBase[k] || "";
+      if (oldV && oldV !== newV) {
+        recordInventoryChange(newProduct.name, newBase.size || "—", label, oldV, newV, newProduct.brand || "", newProduct.description || "");
+      }
+    });
+    [["qtyOnHand", "Qty on Hand"], ["defaultQty", "Default"]].forEach(([k, label]) => {
+      const oldV = oldBase[k] || "0", newV = newBase[k] || "";
+      if (String(oldV) !== String(newV) && newV !== "") {
+        recordInventoryChange(newProduct.name, newBase.size || "—", label, oldV, newV, newProduct.brand || "", newProduct.description || "");
+      }
+    });
+  };
+
   const toggleHighlight = (id) => {
     setHighlightedIds((prev) => {
       const next = new Set(prev);
@@ -1003,9 +1115,10 @@ function ProductCatalogApp() {
 
   const brandCounts = useMemo(() => {
     const map = {};
+    (memory.brand || []).forEach((b) => { map[b] = 0; }); // every managed brand shows, even with 0 products
     products.forEach((p) => { if (p.brand) map[p.brand] = (map[p.brand] || 0) + 1; });
-    return Object.entries(map);
-  }, [products]);
+    return Object.entries(map).sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: "base" }));
+  }, [products, memory.brand]);
 
   useEffect(() => {
     setSummaryBrands((prev) => {
@@ -1077,8 +1190,38 @@ function ProductCatalogApp() {
     const map = {};
     (memory.category || []).forEach((c) => { map[c] = 0; }); // every managed category shows, even with 0 products
     products.forEach((p) => { if (p.category) map[p.category] = (map[p.category] || 0) + 1; });
-    return Object.entries(map);
+    return Object.entries(map).sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: "base" }));
   }, [products, memory.category]);
+
+  const brandMenuCounts = useMemo(() => {
+    const map = {};
+    (memory.brand || []).forEach((b) => { map[b] = 0; });
+    products.forEach((p) => { if (p.brand) map[p.brand] = (map[p.brand] || 0) + 1; });
+    return Object.entries(map);
+  }, [products, memory.brand]);
+
+  const typeMenuCounts = useMemo(() => {
+    const map = {};
+    (memory.type || []).forEach((t) => { map[t] = 0; });
+    mediaIndex.forEach((m) => { if (m.type) map[m.type] = (map[m.type] || 0) + 1; });
+    return Object.entries(map);
+  }, [mediaIndex, memory.type]);
+
+  const sourceMenuCounts = useMemo(() => {
+    const map = {};
+    (memory.source || []).forEach((s) => { map[s] = 0; });
+    mediaIndex.forEach((m) => { if (m.source) map[m.source] = (map[m.source] || 0) + 1; });
+    return Object.entries(map);
+  }, [mediaIndex, memory.source]);
+
+  const sizeMenuCounts = useMemo(() => {
+    const map = {};
+    (memory.size || []).forEach((s) => { map[s] = 0; }); // every managed size shows, even with 0 uses
+    products.forEach((p) => {
+      (p.sizes || []).forEach((s) => { if (s.size) map[s.size] = (map[s.size] || 0) + 1; });
+    });
+    return Object.entries(map);
+  }, [products, memory.size]);
 
   const filtered = useMemo(() => {
     let list = [...products];
@@ -1167,24 +1310,51 @@ function ProductCatalogApp() {
 
   // Compares the currently open draft against the snapshot taken when the modal opened
   // (or last saved), and silently logs every detected change to history. No popups —
-  // this only runs when Save or Save and Close is actually clicked.
+  // this only runs when Save or Save and Close is actually clicked. Only counts as a
+  // change when a real prior value gets overwritten — the initial entry of a blank
+  // field (or a brand-new product's starting values) is never logged.
   const recordAllChangesOnSave = (finalDraft) => {
     const loaded = draftLoadedRef.current;
     if (!loaded || !isEditing) return;
-    const textFields = [["name", "Product Name"], ["description", "Description"], ["shopifyHandle", "Shopify Handle"]];
+    const textFields = [["name", "Product Name"], ["description", "Description"], ["shopifyHandle", "Shopify Handle"], ["additionalInfo", "Ingredients"]];
     textFields.forEach(([k, label]) => {
       const oldV = loaded[k] || "", newV = finalDraft[k] || "";
       if (oldV && oldV !== newV) {
         recordInventoryChange(finalDraft.name, "", label, oldV, newV, finalDraft.brand || "", finalDraft.description || "");
       }
     });
-    (finalDraft.sizes || []).forEach((s, i) => {
-      const os = loaded.sizes?.[i];
-      if (!os) return; // newly added size/shade — nothing to compare against
-      const sizeLabel = s.size || (s.sizeType === "shade" ? `Shade ${i + 1}` : `Size ${i + 1}`);
-      [["wholesale", "Wholesale"], ["retail", "Retail"], ["qtyOnHand", "Qty on Hand"], ["defaultQty", "Default"]].forEach(([k, label]) => {
+
+    const oldSizes = loaded.sizes || [];
+    const newSizes = finalDraft.sizes || [];
+    const newIds = new Set(newSizes.map((s) => s.id));
+    const labelFor = (s, i) => s.size || (s.sizeType === "shade" ? `Shade ${i + 1}` : `Size ${i + 1}`);
+
+    // Removed sizes/shades
+    oldSizes.forEach((os, i) => {
+      if (newIds.has(os.id)) return;
+      const label = labelFor(os, i);
+      recordInventoryChange(finalDraft.name, "", "Size Removed", label, "—", finalDraft.brand || "", finalDraft.description || "");
+    });
+
+    newSizes.forEach((s, i) => {
+      const os = oldSizes.find((o) => o.id === s.id);
+      const sizeLabel = labelFor(s, i);
+      if (!os) {
+        // Newly added size/shade — nothing to diff against, just note that it was added.
+        recordInventoryChange(finalDraft.name, "", "Size Added", "—", sizeLabel, finalDraft.brand || "", finalDraft.description || "");
+        return;
+      }
+      [["wholesale", "Wholesale"], ["retail", "Retail"]].forEach(([k, label]) => {
         const oldV = os[k] || "", newV = s[k] || "";
         if (oldV && oldV !== newV) {
+          recordInventoryChange(finalDraft.name, sizeLabel, label, oldV, newV, finalDraft.brand || "", finalDraft.description || "");
+        }
+      });
+      // Qty on Hand / Default always log, including the very first entry — these
+      // belong in the Inventory Summary's history and must always be findable there.
+      [["qtyOnHand", "Qty on Hand"], ["defaultQty", "Default"]].forEach(([k, label]) => {
+        const oldV = os[k] || "0", newV = s[k] || "";
+        if (String(oldV) !== String(newV) && newV !== "") {
           recordInventoryChange(finalDraft.name, sizeLabel, label, oldV, newV, finalDraft.brand || "", finalDraft.description || "");
         }
       });
@@ -1220,7 +1390,8 @@ function ProductCatalogApp() {
       recordAllChangesOnSave(draft);
       setProducts((prev) => prev.map((p) => (p.id === draft.id ? { ...draft } : p)));
     } else {
-      setProducts((prev) => [...prev, { ...draft, id: Date.now().toString() }]);
+      const saved = { ...draft, id: Date.now().toString() };
+      setProducts((prev) => [...prev, saved]);
     }
     setModalOpen(false);
   };
@@ -1242,6 +1413,41 @@ function ProductCatalogApp() {
     });
     // NOTE: no longer mirrors to `products` immediately — nothing is persisted
     // until the user clicks Save or Save and Close.
+  };
+
+  // Remembers which ML paired with which OZ, and which Wholesale paired with
+  // which Retail, across every size on every product — so entering a value
+  // seen before can auto-fill its usual counterpart.
+  const pairedFieldMemory = useMemo(() => {
+    const mlToOz = {}, ozToMl = {}, wholesaleToRetail = {}, retailToWholesale = {};
+    products.forEach((p) => {
+      (p.sizes || []).forEach((s) => {
+        if (s.volumeMl && s.volumeOz) { mlToOz[s.volumeMl] = s.volumeOz; ozToMl[s.volumeOz] = s.volumeMl; }
+        if (s.wholesale && s.retail) { wholesaleToRetail[s.wholesale] = s.retail; retailToWholesale[s.retail] = s.wholesale; }
+      });
+    });
+    return { mlToOz, ozToMl, wholesaleToRetail, retailToWholesale };
+  }, [products]);
+
+  const PAIRED_FIELD_MAP = {
+    volumeMl: "volumeOz", volumeOz: "volumeMl",
+    wholesale: "retail", retail: "wholesale",
+  };
+  // Called once a value is committed (on blur) — fills in the paired field
+  // from memory, but only if the user hasn't already typed something there.
+  const autofillPairedField = (index, field, value) => {
+    const otherField = PAIRED_FIELD_MAP[field];
+    if (!otherField || !value) return;
+    const mapKey = field === "volumeMl" ? "mlToOz" : field === "volumeOz" ? "ozToMl" : field === "wholesale" ? "wholesaleToRetail" : "retailToWholesale";
+    const known = pairedFieldMemory[mapKey][value];
+    if (!known) return;
+    setDraft((prev) => {
+      const sizes = [...prev.sizes];
+      const cur = sizes[index];
+      if (!cur || cur[otherField]) return prev; // don't overwrite something already filled in
+      sizes[index] = { ...cur, [otherField]: known };
+      return { ...prev, sizes };
+    });
   };
 
   const addSize = () => setDraft((prev) => ({ ...prev, sizes: [...prev.sizes, newSizeRow("size")] }));
@@ -1530,9 +1736,15 @@ function ProductCatalogApp() {
           onSplitEstimate={splitEstimateToExpenditure}
           onReverseConversion={reverseConversion}
           onAddAdjustment={addBudgetAdjustment}
+          onDeleteAdjustment={deleteBudgetAdjustment}
           onUpdateField={updateBudgetTransactionField}
           onReorderCategories={reorderBudgetCategories}
           onReorderTransactions={reorderBudgetTransactions}
+          bankAccounts={bankAccounts}
+          onAddAccount={addBankAccount}
+          onRenameAccount={renameBankAccount}
+          onDeleteAccount={deleteBankAccount}
+          onLinkAccount={(categoryId, accountId) => updateBudgetCategory(categoryId, "accountId", accountId)}
         />
       ) : (
     <div style={{ fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif" }} className="min-h-screen bg-[#F6F4EF] text-[#242320]">
@@ -1549,7 +1761,7 @@ function ProductCatalogApp() {
             onClick={() => setMediaSearchOpen(true)}
             className="flex items-center gap-2 text-sm rounded-full px-4 py-2.5 text-[#5B564C] font-medium border border-[#E0DACB] hover:bg-[#FAF8F3]"
           >
-            <Search size={14} /> Library
+            <Search size={14} /> Media Library
           </button>
           <button
             type="button"
@@ -1656,9 +1868,9 @@ function ProductCatalogApp() {
               type="button"
               onClick={() => setGearMenuOpen((v) => !v)}
               title="Admin settings"
-              className="w-8 h-8 flex items-center justify-center rounded-full text-[#C1BBAA] hover:text-[#8A8377] hover:bg-[#FAF8F3] transition"
+              className="w-9 h-9 flex items-center justify-center rounded-full text-[#8A8377] border border-[#E0DACB] hover:text-[#B9924F] hover:border-[#B9924F] hover:bg-[#FBEEDA] transition"
             >
-              <Settings size={14} />
+              <Settings size={17} />
             </button>
             {gearMenuOpen && (
               <>
@@ -1674,7 +1886,7 @@ function ProductCatalogApp() {
                     onClick={() => { setGearMenuOpen(false); setManageCategoriesOpen(true); }}
                     className="w-full text-left px-3 py-2 text-[12px] text-[#5B564C] hover:bg-[#FAF8F3] transition"
                   >
-                    Manage Categories
+                    Manage Menus
                   </button>
                   <div className="border-t border-[#F0ECE1] my-1" />
                   <button
@@ -1702,11 +1914,15 @@ function ProductCatalogApp() {
             />
           )}
           {manageCategoriesOpen && (
-            <ManageCategoriesModal
+            <ManageMenusModal
               categoryCounts={categoryCounts}
-              onRename={renameCategory}
-              onDelete={deleteCategoryFromMemory}
-              onAdd={(name) => rememberValue("category", name)}
+              brandCounts={brandMenuCounts}
+              typeCounts={typeMenuCounts}
+              sourceCounts={sourceMenuCounts}
+              sizeCounts={sizeMenuCounts}
+              onRename={renameMemoryValue}
+              onDelete={deleteMemoryValue}
+              onAdd={(field, name) => rememberValue(field, name)}
               onClose={() => setManageCategoriesOpen(false)}
             />
           )}
@@ -1784,7 +2000,28 @@ function ProductCatalogApp() {
           </div>
 
           <div className="mb-6 border-t border-[#EDE9DE] pt-5">
-            <p className="text-[8px] tracking-widest text-[#C4BFB0] font-medium mb-2">BRAND</p>
+            <div className="flex items-center justify-between mb-2 px-2.5">
+              <p className="text-[8px] tracking-widest text-[#C4BFB0] font-medium">BRAND</p>
+              <button onClick={() => setAddingBrandInline((v) => !v)} title="Add a brand" className="text-[#C1BBAA] hover:text-[#B9924F] transition">
+                <Plus size={11} />
+              </button>
+            </div>
+            {addingBrandInline && (
+              <div className="flex items-center gap-1 mb-2 px-2.5">
+                <input
+                  autoFocus
+                  value={newBrandInline}
+                  onChange={(e) => setNewBrandInline(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newBrandInline.trim()) { rememberValue("brand", newBrandInline.trim()); setNewBrandInline(""); setAddingBrandInline(false); }
+                    if (e.key === "Escape") { setNewBrandInline(""); setAddingBrandInline(false); }
+                  }}
+                  onBlur={() => { if (!newBrandInline.trim()) setAddingBrandInline(false); }}
+                  placeholder="New brand…"
+                  className="flex-1 text-[12px] border border-[#E3DDCC] rounded-md px-2 py-1 outline-none focus:border-[#B9924F]"
+                />
+              </div>
+            )}
             {brandCounts.map(([brand, count]) => (
               <button
                 key={brand}
@@ -1800,7 +2037,28 @@ function ProductCatalogApp() {
           </div>
 
           <div className="border-t border-[#EDE9DE] pt-5">
-            <p className="text-[8px] tracking-widest text-[#C4BFB0] font-medium mb-2">CATEGORY</p>
+            <div className="flex items-center justify-between mb-2 px-2.5">
+              <p className="text-[8px] tracking-widest text-[#C4BFB0] font-medium">CATEGORY</p>
+              <button onClick={() => setAddingCategoryInline((v) => !v)} title="Add a category" className="text-[#C1BBAA] hover:text-[#B9924F] transition">
+                <Plus size={11} />
+              </button>
+            </div>
+            {addingCategoryInline && (
+              <div className="flex items-center gap-1 mb-2 px-2.5">
+                <input
+                  autoFocus
+                  value={newCategoryInline}
+                  onChange={(e) => setNewCategoryInline(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newCategoryInline.trim()) { rememberValue("category", newCategoryInline.trim()); setNewCategoryInline(""); setAddingCategoryInline(false); }
+                    if (e.key === "Escape") { setNewCategoryInline(""); setAddingCategoryInline(false); }
+                  }}
+                  onBlur={() => { if (!newCategoryInline.trim()) setAddingCategoryInline(false); }}
+                  placeholder="New category…"
+                  className="flex-1 text-[12px] border border-[#E3DDCC] rounded-md px-2 py-1 outline-none focus:border-[#B9924F]"
+                />
+              </div>
+            )}
             {categoryCounts.map(([cat, count]) => (
               <button
                 key={cat}
@@ -1979,7 +2237,16 @@ function ProductCatalogApp() {
                 </h3>
                 <button onClick={closeModal} className="text-[#C1BBAA] hover:text-[#242320] shrink-0"><X size={18} /></button>
               </div>
-              {/* Line 2: product name + description */}
+              {/* Line 2: brand pill (clickable — filters the main list by this brand) */}
+              {isEditing && draft.brand && (
+                <button
+                  onClick={() => { setBrandFilter(draft.brand); setCategoryFilter(null); closeModal(); }}
+                  className="text-[10px] font-semibold tracking-wider text-[#8F6B2E] border border-[#B9924F] bg-[#FBEEDA] rounded-full px-2.5 py-0.5 mt-2 hover:opacity-80 transition"
+                >
+                  {draft.brand}
+                </button>
+              )}
+              {/* Line 3: product name — description */}
               {isEditing && (draft.name || draft.description) && (
                 <p className="text-[13px] mt-1.5 truncate">
                   {draft.name && <span className="font-medium text-[#3F3B34]">{draft.name}</span>}
@@ -2143,8 +2410,9 @@ function ProductCatalogApp() {
                   )}
 
                   {productHistoryOpen && (
-                    <InventoryHistoryModal
+                    <ProductHistoryModal
                       history={inventoryHistory.filter((e) => e.productName === draft.name && PRODUCT_HISTORY_FIELDS.includes(e.field))}
+                      onDelete={deleteInventoryHistoryEntry}
                       onClose={() => setProductHistoryOpen(false)}
                     />
                   )}
@@ -2220,17 +2488,19 @@ function ProductCatalogApp() {
                         </div>
                         <div className="grid grid-cols-4 gap-3">
                           <Field label="Wholesale ($)">
-                            <PriceInput value={base.wholesale} onUpdate={(v) => updateSize(0, "wholesale", v)} />
+                            <PriceInput value={base.wholesale} onUpdate={(v) => { updateSize(0, "wholesale", v); autofillPairedField(0, "wholesale", v); }} />
                           </Field>
                           <Field label="Retail ($)">
-                            <PriceInput value={base.retail} onUpdate={(v) => updateSize(0, "retail", v)} />
+                            <PriceInput value={base.retail} onUpdate={(v) => { updateSize(0, "retail", v); autofillPairedField(0, "retail", v); }} />
                           </Field>
                           <Field label="ML">
                             <input value={base.volumeMl} onChange={(e) => updateSize(0, "volumeMl", e.target.value)}
+                              onBlur={(e) => autofillPairedField(0, "volumeMl", e.target.value)}
                               className="input" placeholder="0" />
                           </Field>
                           <Field label="OZ">
                             <input value={base.volumeOz} onChange={(e) => updateSize(0, "volumeOz", e.target.value)}
+                              onBlur={(e) => autofillPairedField(0, "volumeOz", e.target.value)}
                               className="input" placeholder="0" />
                           </Field>
                         </div>
@@ -2337,16 +2607,20 @@ function ProductCatalogApp() {
                                 </div>
                                 <div className="pb-3 grid grid-cols-4 gap-3" style={{ paddingLeft: "38px", paddingRight: "24px" }}>
                                   <Field label="Wholesale ($)">
-                                    <PriceInput value={s.wholesale} onUpdate={(v) => updateSize(i, "wholesale", v)} />
+                                    <PriceInput value={s.wholesale} onUpdate={(v) => { updateSize(i, "wholesale", v); autofillPairedField(i, "wholesale", v); }} />
                                   </Field>
                                   <Field label="Retail ($)">
-                                    <PriceInput value={s.retail} onUpdate={(v) => updateSize(i, "retail", v)} />
+                                    <PriceInput value={s.retail} onUpdate={(v) => { updateSize(i, "retail", v); autofillPairedField(i, "retail", v); }} />
                                   </Field>
                                   <Field label="ML">
-                                    <input value={s.volumeMl} onChange={(e) => updateSize(i, "volumeMl", e.target.value)} className="input" placeholder="0" />
+                                    <input value={s.volumeMl} onChange={(e) => updateSize(i, "volumeMl", e.target.value)}
+                                      onBlur={(e) => autofillPairedField(i, "volumeMl", e.target.value)}
+                                      className="input" placeholder="0" />
                                   </Field>
                                   <Field label="OZ">
-                                    <input value={s.volumeOz} onChange={(e) => updateSize(i, "volumeOz", e.target.value)} className="input" placeholder="0" />
+                                    <input value={s.volumeOz} onChange={(e) => updateSize(i, "volumeOz", e.target.value)}
+                                      onBlur={(e) => autofillPairedField(i, "volumeOz", e.target.value)}
+                                      className="input" placeholder="0" />
                                   </Field>
                                 </div>
                               </>
@@ -2498,6 +2772,10 @@ function ProductCatalogApp() {
           onRememberValue={rememberValue}
           onSaveNew={(newProducts) => setProducts((prev) => [...prev, ...newProducts])}
           onSaveEdits={(updatedProducts) => {
+            updatedProducts.forEach((updated) => {
+              const old = products.find((p) => p.id === updated.id);
+              if (old) recordSizeDiffs(old, updated);
+            });
             setProducts((prev) => prev.map((p) => {
               const updated = updatedProducts.find((u) => u.id === p.id);
               return updated ? updated : p;
@@ -2878,7 +3156,7 @@ function AddTransactionForm({ type, onAdd, onCancel }) {
 // Budget amount display: number on top, "+"/"−" icon buttons underneath.
 // Each records a fund adjustment (amount + notes) as its own transaction,
 // listed in a collapsed-by-default history below.
-function BudgetAmountAdjuster({ amount, adjustments, onAdjust, onOverwrite, size = "text-[22px]" }) {
+function BudgetAmountAdjuster({ amount, adjustments, onAdjust, onDelete, onOverwrite, size = "text-[22px]" }) {
   const [mode, setMode] = useState(null); // null | "add" | "remove"
   const [input, setInput] = useState("");
   const [notes, setNotes] = useState("");
@@ -2957,6 +3235,15 @@ function BudgetAmountAdjuster({ amount, adjustments, onAdjust, onOverwrite, size
                   </span>
                   <span className="text-[#C1BBAA]">{formatDateShort(a.date)}</span>
                   {a.notes && <span className="flex-1 min-w-0 truncate text-left">{a.notes}</span>}
+                  {onDelete && (
+                    <button
+                      onClick={() => onDelete(a.id)}
+                      title="Delete this adjustment (reverses its amount)"
+                      className="text-[#D8D2C2] hover:text-red-400 shrink-0"
+                    >
+                      <X size={10} />
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -2967,7 +3254,12 @@ function BudgetAmountAdjuster({ amount, adjustments, onAdjust, onOverwrite, size
   );
 }
 
-function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, transactions, adjustments, onAddCategory, onUpdateCategory, onDeleteCategory, onAddTransaction, onDeleteTransaction, onToggleIncluded, onConvertEstimate, onSplitEstimate, onReverseConversion, onAddAdjustment, onUpdateField, onReorderCategories, onReorderTransactions }) {
+function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, transactions, adjustments, onAddCategory, onUpdateCategory, onDeleteCategory, onAddTransaction, onDeleteTransaction, onToggleIncluded, onConvertEstimate, onSplitEstimate, onReverseConversion, onAddAdjustment, onDeleteAdjustment, onUpdateField, onReorderCategories, onReorderTransactions, bankAccounts, onAddAccount, onRenameAccount, onDeleteAccount, onLinkAccount }) {
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [newAccountName, setNewAccountName] = useState("");
+  const [editingAccountId, setEditingAccountId] = useState(null);
+  const [editingAccountName, setEditingAccountName] = useState("");
+  const [expandedAccountIds, setExpandedAccountIds] = useState(new Set());
   const [activeTab, setActiveTab] = useState("overview");
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCatName, setNewCatName] = useState("");
@@ -2977,6 +3269,18 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
   const [splittingId, setSplittingId] = useState(null);
   const [draggedCatId, setDraggedCatId] = useState(null);
   const [draggedTxId, setDraggedTxId] = useState(null);
+  const [printingBudget, setPrintingBudget] = useState(false);
+
+  useEffect(() => {
+    const reset = () => setPrintingBudget(false);
+    window.addEventListener("afterprint", reset);
+    return () => window.removeEventListener("afterprint", reset);
+  }, []);
+
+  const openBudgetPrint = () => {
+    setPrintingBudget(true);
+    setTimeout(() => window.print(), 50);
+  };
 
   const calcForCategory = (categoryId) => {
     const txs = transactions.filter((t) => t.categoryId === categoryId);
@@ -2999,7 +3303,7 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
   const grandRemaining = grandBudget - grandExpense - grandPending;
   const grandAdjustments = adjustments.filter((a) => a.categoryId === null);
 
-  const activeCategory = activeTab === "overview" ? null : categories.find((c) => c.id === activeTab);
+  const activeCategory = (activeTab === "overview" || activeTab === "accounts") ? null : categories.find((c) => c.id === activeTab);
   const activeCalc = activeCategory ? calcForCategory(activeCategory.id) : null;
   const activeBudget = activeCategory ? parseFloat(activeCategory.budgetAmount || 0) : 0;
   const activeRemaining = activeCategory ? activeBudget - activeCalc.expense - activeCalc.pending : 0;
@@ -3074,6 +3378,12 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
         >
           Overview
         </button>
+        <button
+          onClick={() => setActiveTab("accounts")}
+          className={`text-[13px] font-medium px-4 py-3 border-b-2 -mb-px whitespace-nowrap transition ${activeTab === "accounts" ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"}`}
+        >
+          Accounts
+        </button>
         {categories.map((c) => (
           <button
             key={c.id}
@@ -3105,7 +3415,7 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
             {grandRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(grandRemaining))}
           </p>
           <div className="border-t border-[#F0ECE1] mt-3 pt-3">
-            <BudgetAmountAdjuster amount={grandBudget} adjustments={grandAdjustments} onAdjust={(delta, notes) => onAddAdjustment(null, delta, notes)} onOverwrite={onUpdateMainBudget} size="text-[17px]" />
+            <BudgetAmountAdjuster amount={grandBudget} adjustments={grandAdjustments} onAdjust={(delta, notes) => onAddAdjustment(null, delta, notes)} onDelete={onDeleteAdjustment} onOverwrite={onUpdateMainBudget} size="text-[17px]" />
           </div>
         </div>
 
@@ -3162,6 +3472,134 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
                 })}
               </div>
             )
+          ) : activeTab === "accounts" ? (
+            <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-[16px] font-semibold text-[#3F3B34]">Bank Accounts</h2>
+                <button
+                  onClick={() => setAddingAccount(true)}
+                  className="text-[13px] font-medium text-[#B9924F] hover:text-[#8F6B2E]"
+                >
+                  + Add Account
+                </button>
+              </div>
+
+              {addingAccount && (
+                <div className="flex gap-2 items-end mb-4 bg-[#FAF8F3] border border-[#E3DDCC] rounded-xl p-3">
+                  <div className="flex-1">
+                    <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Account Name</label>
+                    <input
+                      autoFocus
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { onAddAccount(newAccountName); setNewAccountName(""); setAddingAccount(false); }
+                        if (e.key === "Escape") { setNewAccountName(""); setAddingAccount(false); }
+                      }}
+                      className="input"
+                      placeholder="e.g. Chase Checking"
+                    />
+                  </div>
+                  <button
+                    onClick={() => { onAddAccount(newAccountName); setNewAccountName(""); setAddingAccount(false); }}
+                    className="text-white rounded-lg px-4 py-2.5 text-[13px] font-medium shrink-0"
+                    style={{ backgroundColor: "#B9924F" }}
+                  >
+                    Add
+                  </button>
+                  <button onClick={() => { setNewAccountName(""); setAddingAccount(false); }} className="text-[#5B564C] border border-[#E3DDCC] rounded-lg px-4 py-2.5 text-[13px] shrink-0 hover:bg-[#FAF8F3] transition">
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {bankAccounts.length === 0 ? (
+                <p className="text-center text-[13px] text-[#C1BBAA] py-6">No accounts yet — click "+ Add Account" to create one, then link it to a budget from that budget's detail page.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {bankAccounts.map((acc) => {
+                    const linkedCalcs = categoryCalcs.filter(({ cat }) => cat.accountId === acc.id);
+                    const totalBudget = linkedCalcs.reduce((sum, { cat }) => sum + parseFloat(cat.budgetAmount || 0), 0);
+                    const totalExpense = linkedCalcs.reduce((sum, c) => sum + c.expense, 0);
+                    const totalPending = linkedCalcs.reduce((sum, c) => sum + c.pending, 0);
+                    const totalRemaining = totalBudget - totalExpense - totalPending;
+                    const isExpanded = expandedAccountIds.has(acc.id);
+                    const toggleExpanded = () => setExpandedAccountIds((prev) => {
+                      const next = new Set(prev);
+                      next.has(acc.id) ? next.delete(acc.id) : next.add(acc.id);
+                      return next;
+                    });
+                    return (
+                      <div key={acc.id} className="rounded-lg border border-[#EAE5D9] overflow-hidden">
+                        <div
+                          onClick={toggleExpanded}
+                          className="flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-[#FAF8F3] cursor-pointer"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                            <ChevronDown size={12} className="text-[#C1BBAA] shrink-0" style={{ transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                            {editingAccountId === acc.id ? (
+                              <input
+                                autoFocus
+                                value={editingAccountName}
+                                onChange={(e) => setEditingAccountName(e.target.value)}
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") { onRenameAccount(acc.id, editingAccountName); setEditingAccountId(null); }
+                                  if (e.key === "Escape") setEditingAccountId(null);
+                                }}
+                                onBlur={() => { onRenameAccount(acc.id, editingAccountName); setEditingAccountId(null); }}
+                                className="input input-sm flex-1"
+                              />
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setEditingAccountId(acc.id); setEditingAccountName(acc.name); }}
+                                className="text-[13.5px] font-medium text-[#3F3B34] text-left truncate"
+                              >
+                                {acc.name}
+                              </button>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-[13px] font-semibold text-[#3F3B34] tabular-nums">${money(totalBudget)}</p>
+                            <p className={`text-[10.5px] font-medium ${totalRemaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}`}>
+                              {totalRemaining < 0 ? "Over by" : "Remaining"} ${money(Math.abs(totalRemaining))} · {linkedCalcs.length} budget{linkedCalcs.length === 1 ? "" : "s"}
+                            </p>
+                          </div>
+                          <button onClick={(e) => { e.stopPropagation(); onDeleteAccount(acc.id); }} className="text-[#C1BBAA] hover:text-red-400 shrink-0">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                        {isExpanded && (
+                          <div className="border-t border-[#F0ECE1] bg-[#FAF8F3] px-3 py-2">
+                            {linkedCalcs.length === 0 ? (
+                              <p className="text-[11.5px] text-[#C1BBAA] py-1">No budgets linked to this account yet — link one from that budget's detail page.</p>
+                            ) : (
+                              <div className="space-y-1">
+                                {linkedCalcs.map(({ cat, expense, pending }) => {
+                                  const remaining = parseFloat(cat.budgetAmount || 0) - expense - pending;
+                                  return (
+                                    <button
+                                      key={cat.id}
+                                      onClick={() => setActiveTab(cat.id)}
+                                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-md hover:bg-white transition text-left"
+                                    >
+                                      <span className="text-[12px] font-medium text-[#3F3B34] truncate">{cat.name || "Untitled"}</span>
+                                      <span className="text-[11px] text-[#8A8377] tabular-nums shrink-0">
+                                        ${money(cat.budgetAmount)} · <span className={remaining < 0 ? "text-red-500" : "text-[#5B8A6E]"}>{remaining < 0 ? "Over" : "Left"} ${money(Math.abs(remaining))}</span>
+                                      </span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           ) : activeCategory ? (
             <div className="bg-white rounded-2xl border border-[#EAE5D9] p-5">
               <div className="flex items-center justify-between mb-3 gap-3">
@@ -3177,9 +3615,28 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
                     title="Include or exclude this whole budget from the Grand Budget's totals"
                   />
                 </div>
-                <button onClick={() => { onDeleteCategory(activeCategory.id); setActiveTab("overview"); }} className="text-[#C1BBAA] hover:text-red-400 shrink-0">
-                  <Trash2 size={14} />
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button onClick={openBudgetPrint} title="Print this budget" className="text-[#C1BBAA] hover:text-[#8F6B2E]">
+                    <Printer size={14} />
+                  </button>
+                  <button onClick={() => { onDeleteCategory(activeCategory.id); setActiveTab("overview"); }} className="text-[#C1BBAA] hover:text-red-400">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 mb-4 -mt-1">
+                <span className="text-[11px] font-medium text-[#A7A190]">Account</span>
+                <select
+                  value={activeCategory.accountId || ""}
+                  onChange={(e) => onLinkAccount(activeCategory.id, e.target.value || null)}
+                  className="text-[12px] border border-[#E3DDCC] rounded-lg px-2 py-1 bg-white text-[#5B564C] outline-none focus:border-[#B9924F]"
+                >
+                  <option value="">Unlinked</option>
+                  {bankAccounts.map((acc) => (
+                    <option key={acc.id} value={acc.id}>{acc.name}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="grid items-center mb-4" style={{ gridTemplateColumns: "104px 1fr 104px" }}>
@@ -3197,7 +3654,7 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
                   </p>
                 </div>
                 <div className="flex justify-center">
-                  <BudgetAmountAdjuster amount={activeBudget} adjustments={activeAdjustments} onAdjust={(delta, notes) => onAddAdjustment(activeCategory.id, delta, notes)} onOverwrite={(v) => onUpdateCategory(activeCategory.id, "budgetAmount", v)} size="text-[16px]" />
+                  <BudgetAmountAdjuster amount={activeBudget} adjustments={activeAdjustments} onAdjust={(delta, notes) => onAddAdjustment(activeCategory.id, delta, notes)} onDelete={onDeleteAdjustment} onOverwrite={(v) => onUpdateCategory(activeCategory.id, "budgetAmount", v)} size="text-[16px]" />
                 </div>
               </div>
 
@@ -3208,6 +3665,53 @@ function BudgetSection({ mainBudgetAmount, onUpdateMainBudget, categories, trans
           ) : null}
         </div>
       </div>
+
+      {/* Printable summary — invisible on screen, shown only via @media print when a budget's Print icon was clicked */}
+      {printingBudget && activeCategory && (
+        <div id="budget-print" style={{ display: "none" }}>
+          <style>{`
+            @media print {
+              body * { visibility: hidden; }
+              #budget-print, #budget-print * { visibility: visible; }
+              #budget-print { display: block !important; position: absolute; left: 0; top: 0; width: 100%; padding: 24px; }
+            }
+          `}</style>
+          <h1 style={{ fontSize: "20px", fontWeight: 600, marginBottom: "4px" }}>{activeCategory.name || "Untitled Budget"}</h1>
+          <p style={{ fontSize: "11px", color: "#8A8377", marginBottom: "16px" }}>Printed {new Date().toLocaleDateString()}</p>
+          <table style={{ width: "100%", fontSize: "12px", marginBottom: "16px" }}>
+            <tbody>
+              <tr><td>Budget</td><td style={{ textAlign: "right" }}>${money(activeBudget)}</td></tr>
+              <tr><td>Expense</td><td style={{ textAlign: "right" }}>${money(activeCalc.expense)}</td></tr>
+              <tr><td>Estimate (pending)</td><td style={{ textAlign: "right" }}>${money(activeCalc.pending)}</td></tr>
+              <tr>
+                <td><strong>{activeRemaining < 0 ? "Over by" : "Remaining"}</strong></td>
+                <td style={{ textAlign: "right" }}><strong>${money(Math.abs(activeRemaining))}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+          <h2 style={{ fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Transactions</h2>
+          <table style={{ width: "100%", fontSize: "11px", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #ccc" }}>
+                <th style={{ textAlign: "left", padding: "4px 0" }}>Type</th>
+                <th style={{ textAlign: "left", padding: "4px 0" }}>Description</th>
+                <th style={{ textAlign: "left", padding: "4px 0" }}>Date</th>
+                <th style={{ textAlign: "right", padding: "4px 0" }}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeCalc.txs.map((t) => (
+                <tr key={t.id} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: "4px 0" }}>{BUDGET_TYPE_META[normalizeTxType(t)]?.label || normalizeTxType(t)}</td>
+                  <td style={{ padding: "4px 0" }}>{t.description || "—"}</td>
+                  <td style={{ padding: "4px 0" }}>{formatDateShort(t.date)}</td>
+                  <td style={{ textAlign: "right", padding: "4px 0" }}>${money(t.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -3229,6 +3733,10 @@ function handleImageDragStart(e, item, src) {
     e.dataTransfer.setData("DownloadURL", `${mime}:${rawName}.${ext}:${src}`);
     e.dataTransfer.setData("text/uri-list", src);
     e.dataTransfer.setData("text/plain", src);
+    // Many drop targets (rich text editors, chat apps, Notion, etc.) look for
+    // an HTML fragment with an <img> tag rather than DownloadURL — this
+    // broadens compatibility beyond just "drag to Desktop/Finder to save".
+    e.dataTransfer.setData("text/html", `<img src="${src}" alt="${rawName}">`);
   } catch (err) {
     // best effort — some browsers restrict certain data types
   }
@@ -3309,7 +3817,7 @@ function ProductSearchInput({ products, value, onChange }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Media Trash — deleted items are kept here for 30 days before permanent purge
 // ─────────────────────────────────────────────────────────────────────────────
-function MediaTrashModal({ trash, onRestore, onClose }) {
+function MediaTrashModal({ trash, products, onRestore, onClose }) {
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[65] p-6" onClick={onClose}>
       <div className="bg-white rounded-2xl w-full flex flex-col overflow-hidden" style={{ maxWidth: "420px", maxHeight: "60vh" }} onClick={(e) => e.stopPropagation()}>
@@ -3320,20 +3828,29 @@ function MediaTrashModal({ trash, onRestore, onClose }) {
         <div className="overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
           {trash.length === 0 ? (
             <p className="text-center text-[12px] text-[#C1BBAA] py-10">Trash is empty.</p>
-          ) : trash.map((t) => (
-            <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 border-b border-[#F4F1EA] last:border-0">
-              <div className="w-10 h-10 rounded-md overflow-hidden bg-[#F3F1EA] flex items-center justify-center shrink-0 text-[#C1BBAA]">
-                {t.item.kind === "image" && t.blobUrl ? <img src={t.blobUrl} alt="" className="w-full h-full object-cover" /> : mediaIconFor(t.item.kind, 16)}
+          ) : trash.map((t) => {
+            const linkedProduct = products ? findLinkedProduct(t.item, products) : null;
+            return (
+              <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 border-b border-[#F4F1EA] last:border-0">
+                <div className="w-10 h-10 rounded-md overflow-hidden bg-[#F3F1EA] flex items-center justify-center shrink-0 text-[#C1BBAA]">
+                  {t.item.kind === "image" && t.blobUrl ? <img src={t.blobUrl} alt="" className="w-full h-full object-cover" /> : mediaIconFor(t.item.kind, 16)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-medium text-[#3F3B34] truncate">{t.item.title || t.item.fileName || "Untitled"}</p>
+                  {linkedProduct && (
+                    <p className="text-[10px] text-[#8A8377] truncate">
+                      <span className="text-[#B9924F] font-medium">{linkedProduct.brand || "—"}</span>
+                      {linkedProduct.name && <> — {linkedProduct.name}</>}
+                    </p>
+                  )}
+                </div>
+                <button onClick={() => onRestore(t.id)}
+                  className="text-[11px] font-medium text-[#B9924F] border border-[#B9924F] rounded-lg px-2.5 py-1 hover:bg-[#FBEEDA] transition shrink-0">
+                  Restore
+                </button>
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[12px] font-medium text-[#3F3B34] truncate">{t.item.title || t.item.fileName || "Untitled"}</p>
-              </div>
-              <button onClick={() => onRestore(t.id)}
-                className="text-[11px] font-medium text-[#B9924F] border border-[#B9924F] rounded-lg px-2.5 py-1 hover:bg-[#FBEEDA] transition shrink-0">
-                Restore
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div className="px-5 py-2 border-t border-[#F0ECE1] shrink-0">
           <p className="text-[9px] text-[#C1BBAA]">Deleted media is kept for 30 days, then permanently removed.</p>
@@ -3368,6 +3885,7 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
   // Selection
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [bulkMediaEditOpen, setBulkMediaEditOpen] = useState(false);
   const [highlightMode, setHighlightMode] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
@@ -3414,8 +3932,26 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
     setLinkUrl("");
   };
 
+  // Checking multiple staged items and editing Type/Source on one fills it
+  // in for every other checked item too — same bulk-fill pattern used
+  // elsewhere (Bulk Edit, the existing-media bulk edit panel).
+  const [selectedPendingIds, setSelectedPendingIds] = useState(new Set());
+  const togglePendingSelected = (tempId) => {
+    setSelectedPendingIds((prev) => {
+      const next = new Set(prev);
+      next.has(tempId) ? next.delete(tempId) : next.add(tempId);
+      return next;
+    });
+  };
+
   const updatePendingField = (tempId, field, value) => {
-    setPending((prev) => prev.map((p) => (p.tempId === tempId ? { ...p, [field]: value } : p)));
+    const isBulkField = field === "type" || field === "source" || field === "assignProductId";
+    const shouldPropagate = isBulkField && selectedPendingIds.has(tempId) && selectedPendingIds.size > 1;
+    setPending((prev) => prev.map((p) => {
+      if (p.tempId === tempId) return { ...p, [field]: value };
+      if (shouldPropagate && selectedPendingIds.has(p.tempId)) return { ...p, [field]: value };
+      return p;
+    }));
   };
   const removePending = (tempId) => setPending((prev) => prev.filter((p) => p.tempId !== tempId));
 
@@ -3502,11 +4038,11 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-start justify-center z-50 overflow-y-auto py-3 px-4">
-      <div className="bg-white rounded-2xl w-full max-w-5xl my-auto flex flex-col overflow-hidden" style={{ maxHeight: "96vh" }}>
+      <div className="bg-white rounded-2xl w-full max-w-7xl my-auto flex flex-col overflow-hidden" style={{ maxHeight: "96vh" }}>
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-[#EAE5D9] shrink-0">
-          <h3 className="text-2xl font-semibold text-[#242320] tracking-tight">Library</h3>
+          <h3 className="text-2xl font-semibold text-[#242320] tracking-tight">Media Library</h3>
           <div className="flex items-center gap-2">
             {libraryTab === "Media" && (
               <button type="button" onClick={() => setTrashOpen(true)}
@@ -3517,7 +4053,7 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
             <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={18} /></button>
           </div>
         </div>
-        {trashOpen && <MediaTrashModal trash={mediaTrash || []} onRestore={onRestore} onClose={() => setTrashOpen(false)} />}
+        {trashOpen && <MediaTrashModal trash={mediaTrash || []} products={products} onRestore={onRestore} onClose={() => setTrashOpen(false)} />}
 
         {/* Media / Content tabs */}
         <div className="flex border-b border-[#EAE5D9] px-6 shrink-0">
@@ -3568,93 +4104,26 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
         ) : (
           <>
 
-        {/* Left: drag-and-drop over paste-a-link, stacked. Right: filters, stacked. — matches the per-product Media tab exactly */}
-        <div className="border-b border-[#EAE5D9] shrink-0 px-6 pt-4 pb-3 grid gap-2.5" style={{ gridTemplateColumns: "1fr 148px" }}>
-          <div className="space-y-2.5">
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => browseRef.current?.click()}
-              className={`rounded-lg border border-dashed px-3 py-4 cursor-pointer transition flex flex-col items-center justify-center gap-1 text-center ${dragOver ? "border-[#B9924F] bg-[#FBEEDA]" : "border-[#DDD6C4] bg-[#FAF8F3] hover:border-[#B9924F]"}`}
-            >
-              <input ref={browseRef} type="file" multiple accept="image/*,.pdf,application/pdf,video/*" className="hidden" onChange={handleBrowse} />
-              <UploadCloud size={15} className="text-[#B9924F]" />
-              <p className="text-[12px] text-[#5B564C] leading-snug">{reading ? "Reading files..." : "Drag & drop, or click to browse"}</p>
-            </div>
-            <div className="rounded-lg border border-[#E3DDCC] px-3 py-4 flex items-center gap-2">
-              <input
-                value={linkUrl}
-                onChange={(e) => setLinkUrl(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLink(); } }}
-                placeholder="Paste a URL and press Enter"
-                className="input"
-              />
-              <button type="button" onClick={addLink} className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-white" style={{ backgroundColor: "#B9924F" }}>
-                <Plus size={14} />
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-              <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5"><Filter size={10} className="text-[#B9924F]" /></div>
-              <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer">
-                <option value="">Type</option>
-                {distinctTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </div>
-            <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-              <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5"><Filter size={10} className="text-[#B9924F]" /></div>
-              <select value={filterSource} onChange={(e) => setFilterSource(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer">
-                <option value="">Source</option>
-                {distinctSources.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-            <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-              <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5"><Filter size={10} className="text-[#B9924F]" /></div>
-              <select value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer">
-                <option value="">Date</option>
-                {dateRanges.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-              </select>
-            </div>
-            <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-              <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5"><Filter size={10} className="text-[#B9924F]" /></div>
-              <select value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer">
-                <option value="">Brand</option>
-                {distinctBrands.map((b) => <option key={b} value={b}>{b}</option>)}
-              </select>
-            </div>
-            <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-              <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5"><Filter size={10} className="text-[#B9924F]" /></div>
-              <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer">
-                <option value="">Category</option>
-                {distinctCats.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <button
-              type="button"
-              onClick={() => { setFilterType(""); setFilterSource(""); setFilterDate(""); setFilterBrand(""); setFilterCategory(""); }}
-              className="flex rounded-lg overflow-hidden border border-[#E3C7C2] w-full"
-            >
-              <span className="w-1/3 shrink-0 bg-[#F3E1DE] flex items-center justify-center py-1.5">
-                <X size={10} className="text-[#B9604F]" />
-              </span>
-              <span className="w-2/3 bg-[#FCF7F6] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug text-left">
-                Clear Filters
-              </span>
-            </button>
-          </div>
-        </div>
-
         {/* Staging area — each item gets its own Title, Type, Source, and Assign-to-Product */}
         {pending.length > 0 && (
           <div className="px-6 py-3 border-b border-[#EAE5D9] shrink-0 space-y-2">
-            <p className="text-[11px] font-semibold text-[#8A8377]">Ready to add ({pending.length}) — fill in each one, then add to library</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={pending.length > 0 && pending.every((p) => selectedPendingIds.has(p.tempId))}
+                onChange={(e) => setSelectedPendingIds(e.target.checked ? new Set(pending.map((p) => p.tempId)) : new Set())}
+                title="Select all"
+              />
+              <p className="text-[11px] font-semibold text-[#8A8377]">
+                Ready to add ({pending.length}) — fill in each one, then add to library
+                {selectedPendingIds.size > 1 && <span className="text-[#B9924F] font-medium"> · {selectedPendingIds.size} checked, bulk-fill active for Type/Source/Assign-to-Product</span>}
+              </p>
+            </div>
             <div className="space-y-2 overflow-y-auto pr-1" style={{ maxHeight: "240px" }}>
               {pending.map((p) => (
-                <div key={p.tempId} className="p-2.5 rounded-lg bg-[#FAF8F3] border border-[#EAE5D9] space-y-1.5">
+                <div key={p.tempId} className={`p-2.5 rounded-lg border space-y-1.5 ${selectedPendingIds.has(p.tempId) ? "bg-[#FBEEDA] border-[#B9924F]" : "bg-[#FAF8F3] border-[#EAE5D9]"}`}>
                   <div className="flex items-center gap-2">
+                    <input type="checkbox" checked={selectedPendingIds.has(p.tempId)} onChange={() => togglePendingSelected(p.tempId)} className="shrink-0" />
                     {p.kind === "image" && p.dataUrl ? (
                       <img src={p.dataUrl} alt="" className="w-9 h-9 rounded object-cover shrink-0 border border-[#E3DDCC]" />
                     ) : (
@@ -3679,109 +4148,228 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
                 </div>
               ))}
             </div>
-            <button onClick={commitAll} className="w-full text-[12px] font-medium text-white rounded-lg py-2 hover:opacity-90 transition" style={{ backgroundColor: "#B9924F" }}>
-              Add {pending.length} item{pending.length > 1 ? "s" : ""} to library
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => setPending([])} className="flex-1 text-[12px] font-medium text-[#5B564C] border border-[#E3DDCC] rounded-lg py-2 hover:bg-white transition">
+                Cancel
+              </button>
+              <button onClick={commitAll} className="flex-1 text-[12px] font-medium rounded-lg py-2 border transition" style={{ borderColor: "#B9924F", color: "#B9924F" }}>
+                Save
+              </button>
+              <button onClick={async () => { await commitAll(); onClose(); }} className="flex-1 text-[12px] font-medium text-white rounded-lg py-2 hover:opacity-90 transition" style={{ backgroundColor: "#B9924F" }}>
+                Save and Close
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Search + Select toolbar */}
-        <div className="px-6 pt-3 pb-2 border-b border-[#EAE5D9] shrink-0 space-y-2">
-          <div className="flex items-center gap-2.5 bg-[#FAF8F3] border border-[#E3DDCC] rounded-xl px-3.5 py-2">
-            <Search size={13} className="text-[#C1BBAA]" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, source, type, product…" className="flex-1 outline-none text-[13px] bg-transparent" />
-            {query && <span className="text-[10px] text-[#C1BBAA]">{filtered.length} results</span>}
-          </div>
-          {/* Select and Highlight — two independent, always-present toggle buttons */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <button
-              type="button"
-              onClick={() => {
-                if (selectMode) { setSelectMode(false); setSelected(new Set()); }
-                else { setSelectMode(true); setHighlightMode(false); }
-              }}
-              className="text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
-              style={selectMode
-                ? { border: "2px solid #1F5A7A", backgroundColor: "#EAF3F8", color: "#1F5A7A", width: "96px", textAlign: "center" }
-                : { border: "2px solid #D8D2C2", backgroundColor: "transparent", color: "#8A8377", width: "96px", textAlign: "center" }}
-            >
-              Select
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (highlightMode) setHighlightMode(false);
-                else { setHighlightMode(true); setSelectMode(false); setSelected(new Set()); }
-              }}
-              className="text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
-              style={highlightMode
-                ? { border: "2px solid #8E241A", backgroundColor: "#FDEEEC", color: "#8E241A", width: "96px", textAlign: "center" }
-                : { border: "2px solid #D8D2C2", backgroundColor: "transparent", color: "#8A8377", width: "96px", textAlign: "center" }}
-            >
-              Highlight
-            </button>
-            {selectMode && (
-              <>
-                <MediaCopyButton selected={selected} mediaIndex={mediaIndex} mediaBlobs={mediaBlobs} disabled={selected.size === 0} />
-                <SelectDeleteButton
-                  count={selected.size}
-                  disabled={selected.size === 0}
-                  blockedCount={0}
-                  onConfirm={() => {
-                    selected.forEach((id) => onDelete(id));
-                    setSelected(new Set());
-                    setSelectMode(false);
+        {/* Main working area — the media grid gets the majority of the width
+            (left, ~2/3); search, upload, and filters live in a stacked
+            column on the right (~1/3), giving the gallery itself real
+            prominence instead of sharing equal billing with the controls. */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* LEFT: Select/Highlight toolbar + the thumbnail grid */}
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            <div className="px-6 pt-3 pb-2 border-b border-[#EAE5D9] shrink-0">
+              {/* Select and Highlight — two independent, always-present toggle buttons */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectMode) { setSelectMode(false); setSelected(new Set()); }
+                    else { setSelectMode(true); setHighlightMode(false); }
                   }}
-                />
-              </>
-            )}
-            <span className="ml-auto text-[10px] text-[#C1BBAA]">{filtered.length} of {mediaIndex.length}</span>
-          </div>
-        </div>
-
-        {/* Thumbnail grid */}
-        <div className="px-6 py-4 overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
-          {filtered.length === 0 ? (
-            <p className="text-center text-sm text-[#C1BBAA] py-10">No media found.</p>
-          ) : (
-            <div className="grid grid-cols-7 gap-2.5">
-              {filtered.map((item) => {
-                const src = item.kind === "image" ? mediaBlobs[item.id] || item.url : null;
-                const isMultiSel = selected.has(item.id);
-                const isHighlighted = (highlightedIds || new Set()).has(item.id);
-                const usedBy = productsByMediaId[item.id] || [];
-                const isInactive = inactiveMediaIds?.has(item.id);
-                const borderStyle = isMultiSel
-                  ? { border: "2px solid #4B8DB5", boxShadow: "0 0 0 2px rgba(75,141,181,0.35)" }
-                  : isHighlighted
-                  ? { border: "2px solid #C0392B", boxShadow: "0 0 0 2px rgba(192,57,43,0.35)" }
-                  : { border: "1px solid #E9E4D8" };
-                const blockedFromSelect = selectMode && isHighlighted;
-                const borderStyleFinal = editingId === item.id
-                  ? { border: "2px solid #B9924F", boxShadow: "0 0 0 2px rgba(185,146,79,0.35)" }
-                  : borderStyle;
-                return (
-                  <div key={item.id}
-                    className={`rounded-xl overflow-hidden group transition ${isInactive ? "opacity-55 grayscale-[35%]" : "hover:shadow-sm"} ${blockedFromSelect ? "cursor-not-allowed" : "cursor-pointer"}`}
-                    style={borderStyleFinal}
-                    onClick={() => handleThumbClick(item)}
-                    onDoubleClick={(e) => { e.stopPropagation(); handleThumbDoubleClick(item); }}>
-                    <div className="relative aspect-square bg-[#F3F1EA] flex items-center justify-center text-[#C1BBAA]">
-                      {src ? <img src={src} alt={item.title || "media"} className="w-full h-full object-cover" /> : mediaIconFor(item.kind, 20)}
-                    </div>
-                    <div className="p-1.5" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        value={getStagedValue(item, "title")}
-                        onChange={(e) => stagePendingEdit(item.id, "title", e.target.value)}
-                        placeholder="Title"
-                        className="w-full text-[10px] font-medium border-none outline-none px-0 bg-transparent text-[#3F3B34] leading-tight" />
-                      {usedBy.length > 0 && <p className="text-[8px] text-[#C1BBAA] truncate mt-0.5">Used: {usedBy.join(", ")}</p>}
-                    </div>
-                  </div>
-                );
-              })}
+                  className="text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
+                  style={selectMode
+                    ? { border: "2px solid #1F5A7A", backgroundColor: "#EAF3F8", color: "#1F5A7A", width: "96px", textAlign: "center" }
+                    : { border: "2px solid #D8D2C2", backgroundColor: "transparent", color: "#8A8377", width: "96px", textAlign: "center" }}
+                >
+                  Select
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (highlightMode) setHighlightMode(false);
+                    else { setHighlightMode(true); setSelectMode(false); setSelected(new Set()); }
+                  }}
+                  className="text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
+                  style={highlightMode
+                    ? { border: "2px solid #8E241A", backgroundColor: "#FDEEEC", color: "#8E241A", width: "96px", textAlign: "center" }
+                    : { border: "2px solid #D8D2C2", backgroundColor: "transparent", color: "#8A8377", width: "96px", textAlign: "center" }}
+                >
+                  Highlight
+                </button>
+                {selectMode && (
+                  <>
+                    <MediaCopyButton selected={selected} mediaIndex={mediaIndex} mediaBlobs={mediaBlobs} disabled={selected.size === 0} />
+                    <button
+                      onClick={() => setBulkMediaEditOpen(true)}
+                      disabled={selected.size === 0}
+                      className="flex items-center justify-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
+                      style={{
+                        width: "96px", textAlign: "center",
+                        border: selected.size === 0 ? "1px solid #E3DDCC" : "1px solid #D8D2C2",
+                        color: selected.size === 0 ? "#C1BBAA" : "#8A8377",
+                        cursor: selected.size === 0 ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      <Pencil size={11} /> Edit
+                    </button>
+                    <SelectDeleteButton
+                      count={selected.size}
+                      disabled={selected.size === 0}
+                      blockedCount={0}
+                      onConfirm={() => {
+                        selected.forEach((id) => onDelete(id));
+                        setSelected(new Set());
+                        setSelectMode(false);
+                      }}
+                    />
+                  </>
+                )}
+                {highlightMode && (highlightedIds || new Set()).size > 0 && (
+                  <button onClick={onClearHighlights} className="text-[11px] text-[#8A8377] hover:text-[#3F3B34] underline">
+                    Clear all highlights
+                  </button>
+                )}
+                <span className="ml-auto text-[10px] text-[#C1BBAA]">{filtered.length} of {mediaIndex.length}</span>
+              </div>
             </div>
-          )}
+
+            {/* Thumbnail grid */}
+            <div className="px-6 py-4 overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
+              {filtered.length === 0 ? (
+                <p className="text-center text-sm text-[#C1BBAA] py-10">No media found.</p>
+              ) : (
+                <div className="grid grid-cols-5 gap-2.5">
+                  {filtered.map((item) => {
+                    const src = item.kind === "image" ? mediaBlobs[item.id] || item.url : null;
+                    const isMultiSel = selected.has(item.id);
+                    const isHighlighted = (highlightedIds || new Set()).has(item.id);
+                    const isInactive = inactiveMediaIds?.has(item.id);
+                    const linkedProduct = findLinkedProduct(item, products);
+                    const borderStyle = isMultiSel
+                      ? { border: "2px solid #4B8DB5", boxShadow: "0 0 0 2px rgba(75,141,181,0.35)" }
+                      : isHighlighted
+                      ? { border: "2px solid #C0392B", boxShadow: "0 0 0 2px rgba(192,57,43,0.35)" }
+                      : { border: "1px solid #E9E4D8" };
+                    const blockedFromSelect = selectMode && isHighlighted;
+                    const borderStyleFinal = editingId === item.id
+                      ? { border: "2px solid #B9924F", boxShadow: "0 0 0 2px rgba(185,146,79,0.35)" }
+                      : borderStyle;
+                    return (
+                      <div key={item.id}
+                        className={`rounded-xl overflow-hidden group transition ${isInactive ? "opacity-55 grayscale-[35%]" : "hover:shadow-sm"} ${blockedFromSelect ? "cursor-not-allowed" : "cursor-pointer"}`}
+                        style={borderStyleFinal}
+                        onClick={() => handleThumbClick(item)}
+                        onDoubleClick={(e) => { e.stopPropagation(); handleThumbDoubleClick(item); }}>
+                        <div className="relative aspect-square bg-[#F3F1EA] flex items-center justify-center text-[#C1BBAA]">
+                          {src ? <img src={src} alt={item.title || "media"} className="w-full h-full object-cover" /> : mediaIconFor(item.kind, 20)}
+                        </div>
+                        <div className="p-1.5" onClick={(e) => e.stopPropagation()}>
+                          {linkedProduct ? (
+                            <>
+                              <p className="text-[10px] font-medium text-[#3F3B34] leading-tight truncate">{linkedProduct.name || "Untitled"}</p>
+                              <p className="text-[9px] text-[#ACA692] leading-tight truncate mt-0.5">{linkedProduct.brand || ""}</p>
+                            </>
+                          ) : (
+                            <input
+                              value={getStagedValue(item, "title")}
+                              onChange={(e) => stagePendingEdit(item.id, "title", e.target.value)}
+                              placeholder="Title"
+                              className="w-full text-[10px] font-medium border-none outline-none px-0 bg-transparent text-[#3F3B34] leading-tight" />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* RIGHT: search, upload, and filters — stacked, narrower column */}
+          <div className="shrink-0 border-l border-[#EAE5D9] overflow-y-auto px-4 py-4 space-y-3" style={{ width: "320px" }}>
+            <div className="flex items-center gap-2 bg-[#FAF8F3] border border-[#E3DDCC] rounded-xl px-3 py-2">
+              <Search size={13} className="text-[#C1BBAA] shrink-0" />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" className="flex-1 min-w-0 outline-none text-[13px] bg-transparent" />
+            </div>
+            {query && <p className="text-[10px] text-[#C1BBAA] -mt-2">{filtered.length} results</p>}
+
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => browseRef.current?.click()}
+              className={`rounded-lg border border-dashed px-3 py-4 cursor-pointer transition flex flex-col items-center justify-center gap-1 text-center ${dragOver ? "border-[#B9924F] bg-[#FBEEDA]" : "border-[#DDD6C4] bg-[#FAF8F3] hover:border-[#B9924F]"}`}
+            >
+              <input ref={browseRef} type="file" multiple accept="image/*,.pdf,application/pdf,video/*" className="hidden" onChange={handleBrowse} />
+              <UploadCloud size={15} className="text-[#B9924F]" />
+              <p className="text-[12px] text-[#5B564C] leading-snug">{reading ? "Reading files..." : "Drag & drop, or click to browse"}</p>
+            </div>
+
+            <div className="rounded-lg border border-[#E3DDCC] px-3 py-3 flex items-center gap-2">
+              <input
+                value={linkUrl}
+                onChange={(e) => setLinkUrl(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLink(); } }}
+                placeholder="Paste a URL…"
+                className="input"
+              />
+              <button type="button" onClick={addLink} className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-white" style={{ backgroundColor: "#B9924F" }}>
+                <Plus size={14} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-[#F0ECE1]">
+              <div className="flex rounded-md overflow-hidden border border-[#E3DDCC]">
+                <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1"><Filter size={9} className="text-[#B9924F]" /></div>
+                <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug outline-none cursor-pointer">
+                  <option value="">Type</option>
+                  {distinctTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div className="flex rounded-md overflow-hidden border border-[#E3DDCC]">
+                <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1"><Filter size={9} className="text-[#B9924F]" /></div>
+                <select value={filterSource} onChange={(e) => setFilterSource(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug outline-none cursor-pointer">
+                  <option value="">Source</option>
+                  {distinctSources.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="flex rounded-md overflow-hidden border border-[#E3DDCC]">
+                <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1"><Filter size={9} className="text-[#B9924F]" /></div>
+                <select value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug outline-none cursor-pointer">
+                  <option value="">Date</option>
+                  {dateRanges.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                </select>
+              </div>
+              <div className="flex rounded-md overflow-hidden border border-[#E3DDCC]">
+                <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1"><Filter size={9} className="text-[#B9924F]" /></div>
+                <select value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug outline-none cursor-pointer">
+                  <option value="">Brand</option>
+                  {distinctBrands.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div className="flex rounded-md overflow-hidden border border-[#E3DDCC]">
+                <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1"><Filter size={9} className="text-[#B9924F]" /></div>
+                <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="w-2/3 appearance-none bg-[#FAF8F3] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug outline-none cursor-pointer">
+                  <option value="">Category</option>
+                  {distinctCats.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setFilterType(""); setFilterSource(""); setFilterDate(""); setFilterBrand(""); setFilterCategory(""); }}
+                className="flex rounded-md overflow-hidden border border-[#E3C7C2] w-full"
+              >
+                <span className="w-1/3 shrink-0 bg-[#F3E1DE] flex items-center justify-center py-1">
+                  <X size={9} className="text-[#B9604F]" />
+                </span>
+                <span className="w-2/3 bg-[#FCF7F6] pl-1 pr-0.5 py-1 text-[11px] text-[#5B564C] leading-snug text-left truncate">
+                  Clear
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Double-click edit panel — Title, Type, Source (staged, applied on Save) */}
@@ -3850,18 +4438,19 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
           return (
           <div className="fixed inset-0 bg-black/55 flex items-center justify-center z-[70] p-6" onClick={() => setPreviewId(null)}>
             <div className="bg-white rounded-2xl w-full flex flex-col overflow-hidden" style={{ maxWidth: "672px", maxHeight: "90vh" }} onClick={(e) => e.stopPropagation()}>
-              <div className="flex justify-between px-4 py-2.5 border-b border-[#EAE5D9] shrink-0"><p className="text-[13px] font-medium text-[#3F3B34] truncate">{item.title || "Preview"}</p><button onClick={() => setPreviewId(null)} className="text-[#C1BBAA] hover:text-[#242320]"><X size={15} /></button></div>
+              <div className="flex items-start justify-between px-4 py-2.5 border-b border-[#EAE5D9] shrink-0 gap-3">
+                <div className="min-w-0">
+                  <p className="text-[14px] font-semibold text-[#242320] truncate">{linkedProduct ? (linkedProduct.name || "Untitled") : (item.title || "Preview")}</p>
+                  {linkedProduct?.brand && <p className="text-[11px] text-[#B9924F] font-medium truncate">{linkedProduct.brand}</p>}
+                </div>
+                <button onClick={() => setPreviewId(null)} className="text-[#C1BBAA] hover:text-[#242320] shrink-0"><X size={15} /></button>
+              </div>
               <div className="flex items-center justify-center bg-[#F3F1EA]" style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>
                 {s && <img src={s} alt="" className="max-w-full max-h-full object-contain" />}
               </div>
-              {linkedProduct && (
-                <div className="px-4 py-2 border-t border-[#EAE5D9] shrink-0 bg-[#FAF8F3]">
-                  <p className="text-[11px] leading-relaxed">
-                    <span className="font-semibold text-[#B9924F]">{linkedProduct.brand || "—"}</span>
-                    <span className="text-[#C1BBAA] mx-1.5">—</span>
-                    <span className="font-medium text-[#242320]">{linkedProduct.name}</span>
-                    {linkedProduct.description && <><span className="text-[#C1BBAA] mx-1.5">—</span><span className="text-[#8A8377]">{linkedProduct.description}</span></>}
-                  </p>
+              {linkedProduct?.description && (
+                <div className="px-4 py-3 border-t border-[#EAE5D9] shrink-0 bg-[#FAF8F3] overflow-y-auto" style={{ maxHeight: "120px" }}>
+                  <p className="text-[12px] text-[#5B564C] leading-relaxed">{linkedProduct.description}</p>
                 </div>
               )}
             </div>
@@ -3954,6 +4543,15 @@ function MediaLibraryModal({ mediaIndex, mediaBlobs, memory, onRememberValue, pr
             Save and Close
           </button>
         </div>
+        {bulkMediaEditOpen && selected.size > 0 && (
+          <BulkMediaEditModal
+            items={mediaIndex.filter((m) => selected.has(m.id))}
+            memory={memory}
+            onRememberValue={onRememberValue}
+            onUpdateItem={onUpdateItem}
+            onClose={() => setBulkMediaEditOpen(false)}
+          />
+        )}
       </div>
     </div>
   );
@@ -4025,42 +4623,149 @@ function InventoryHistoryModal({ history, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gear icon → Permanent delete modal — search + confirmation
+// Product tab → History — a full, unfiltered log of every change made to this
+// product's profile (name, description, ingredients, wholesale, retail, volume).
+// No search — this is meant to be read start to finish — and each entry can
+// be deleted individually (e.g. when an update was just a typo).
 // ─────────────────────────────────────────────────────────────────────────────
+function ProductHistoryModal({ history, onDelete, onClose }) {
+  const [expandedIds, setExpandedIds] = useState(new Set());
+  const fmt = (ts) => {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  const num = (v) => parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  const isNumericField = (field) => field === "Wholesale" || field === "Retail";
+  const toggleExpanded = (id) => setExpandedIds((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+  const sorted = [...(history || [])].sort((a, b) => b.ts - a.ts);
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[55] p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl w-full flex flex-col overflow-hidden" style={{ maxWidth: "600px", maxHeight: "72vh" }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#EAE5D9] shrink-0">
+          <h3 className="text-[17px] font-semibold text-[#242320]">Product History</h3>
+          <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={16} /></button>
+        </div>
+        <div className="overflow-y-auto" style={{ flex: "1 1 auto", minHeight: 0 }}>
+          {sorted.length === 0 ? (
+            <p className="text-center text-[12px] text-[#C1BBAA] py-10">No changes recorded yet.</p>
+          ) : sorted.map((e) => {
+            const isIngredients = e.field === "Ingredients";
+            const numeric = isNumericField(e.field);
+            const from = num(e.from), to = num(e.to);
+            const isUp = numeric && !isNaN(from) && !isNaN(to) && to > from;
+            const isDown = numeric && !isNaN(from) && !isNaN(to) && to < from;
+            const isOpen = expandedIds.has(e.id);
+
+            if (isIngredients) {
+              return (
+                <div key={e.id} className="border-b border-[#F4F1EA] last:border-0">
+                  <div className="flex items-center gap-2 px-4 py-2 hover:bg-[#FAFAF8]">
+                    <span className="w-8 shrink-0 text-[10px] text-[#ACA692]">{fmt(e.ts)}</span>
+                    <button onClick={() => toggleExpanded(e.id)} className="flex items-center gap-1 text-[11px] font-semibold text-[#3F3B34] hover:text-[#8F6B2E] transition">
+                      <ChevronDown size={11} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                      Ingredient Update
+                    </button>
+                    <span className="flex-1" />
+                    <button onClick={() => onDelete(e.id)} title="Delete this entry" className="text-[#D8D2C2] hover:text-red-400 shrink-0">
+                      <X size={12} />
+                    </button>
+                  </div>
+                  {isOpen && (
+                    <div className="px-4 pb-3 pl-14">
+                      <p className="text-[9px] font-semibold uppercase tracking-wide text-[#C1BBAA] mb-1">Previous version</p>
+                      <p className="text-[11px] text-[#8A8377] whitespace-pre-wrap bg-[#FAF8F3] border border-[#F0ECE1] rounded-lg p-2.5">{e.from || "—"}</p>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            return (
+              <div key={e.id} className="flex items-center gap-2 px-4 py-2 border-b border-[#F4F1EA] last:border-0 hover:bg-[#FAFAF8]">
+                <span className="w-8 shrink-0 text-[10px] text-[#ACA692]">{fmt(e.ts)}</span>
+                <span className="text-[11px] font-semibold text-[#3F3B34] shrink-0">{e.field}</span>
+                {e.sizeLabel && e.sizeLabel !== "—" && <span className="text-[10px] text-[#B9924F] shrink-0">· {e.sizeLabel}</span>}
+                <span className="flex-1 min-w-0 flex items-center gap-1.5 text-[11px] text-[#8A8377] justify-end">
+                  <span className="truncate max-w-[220px]" title={e.from}>{e.from || "—"}</span>
+                  <span className={`shrink-0 ${isUp ? "text-[#5B8A6E]" : isDown ? "text-[#C9624A]" : "text-[#C1BBAA]"}`} style={{ fontSize: "9px" }}>
+                    {numeric ? (isDown ? "▼" : "▲") : "→"}
+                  </span>
+                  <span className="truncate max-w-[220px] font-medium text-[#B9924F]" title={e.to}>{e.to || "—"}</span>
+                </span>
+                <button onClick={() => onDelete(e.id)} title="Delete this entry" className="text-[#D8D2C2] hover:text-red-400 shrink-0">
+                  <X size={12} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Gear icon → Manage Categories — add / rename / delete, feeds the Category
 // dropdown everywhere and the sidebar's CATEGORY filter list
 // ─────────────────────────────────────────────────────────────────────────────
-function ManageCategoriesModal({ categoryCounts, onRename, onDelete, onAdd, onClose }) {
+function ManageMenusModal({ categoryCounts, brandCounts, typeCounts, sourceCounts, sizeCounts, onRename, onDelete, onAdd, onClose }) {
+  const [tab, setTab] = useState("category"); // "category" | "brand" | "type" | "source" | "size"
   const [newName, setNewName] = useState("");
-  const [editingName, setEditingName] = useState(null); // category currently being renamed
+  const [editingName, setEditingName] = useState(null);
   const [editValue, setEditValue] = useState("");
-  const [confirmingDelete, setConfirmingDelete] = useState(null); // category pending delete confirmation
+  const [confirmingDelete, setConfirmingDelete] = useState(null);
+
+  const TABS = [
+    { key: "category", label: "Categories", counts: categoryCounts, note: "Renaming or deleting updates every product using that category." },
+    { key: "brand", label: "Brands", counts: brandCounts, note: "Renaming or deleting updates every product using that brand." },
+    { key: "size", label: "Sizes", counts: sizeCounts || [], note: "Renaming or deleting updates every product size/shade using that name." },
+    { key: "type", label: "Media Types", counts: typeCounts, note: "Renaming or deleting updates every media item using that type." },
+    { key: "source", label: "Media Sources", counts: sourceCounts, note: "Renaming or deleting updates every media item using that source." },
+  ];
+  const active = TABS.find((t) => t.key === tab);
 
   const startRename = (name) => { setEditingName(name); setEditValue(name); };
   const commitRename = () => {
-    if (editingName && editValue.trim() && editValue.trim() !== editingName) onRename(editingName, editValue.trim());
+    if (editingName && editValue.trim() && editValue.trim() !== editingName) onRename(tab, editingName, editValue.trim());
     setEditingName(null);
   };
   const addNew = () => {
     if (!newName.trim()) return;
-    onAdd(newName.trim());
+    onAdd(tab, newName.trim());
     setNewName("");
   };
 
+  const switchTab = (key) => { setTab(key); setEditingName(null); setConfirmingDelete(null); setNewName(""); };
+
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[65] p-6" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-sm max-h-[75vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl w-full max-w-sm flex flex-col overflow-hidden" style={{ maxHeight: "75vh" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#EAE5D9] shrink-0">
-          <h3 className="text-[15px] font-medium text-[#242320]">Manage Categories</h3>
+          <h3 className="text-[15px] font-semibold text-[#242320]">Manage Menus</h3>
           <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={16} /></button>
         </div>
 
+        <div className="flex items-center gap-1 px-3 pt-2 border-b border-[#EAE5D9] shrink-0 overflow-x-auto">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => switchTab(t.key)}
+              className={`text-[11.5px] font-medium px-2.5 py-2 border-b-2 -mb-px whitespace-nowrap transition ${tab === t.key ? "border-[#B9924F] text-[#8F6B2E]" : "border-transparent text-[#A7A190] hover:text-[#3F3B34]"}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
         <div className="overflow-y-auto flex-1">
-          {categoryCounts.length === 0 ? (
-            <p className="text-center text-[12px] text-[#C1BBAA] py-10">No categories yet — add one below.</p>
+          {active.counts.length === 0 ? (
+            <p className="text-center text-[12px] text-[#C1BBAA] py-10">None yet — add one below.</p>
           ) : (
-            categoryCounts.map(([name, count]) => (
+            active.counts.map(([name, count]) => (
               <div key={name} className="flex items-center gap-2 px-4 py-2.5 border-b border-[#F4F1EA] last:border-0">
                 {editingName === name ? (
                   <input
@@ -4079,7 +4784,7 @@ function ManageCategoriesModal({ categoryCounts, onRename, onDelete, onAdd, onCl
                 <span className="text-[9px] bg-[#ECE7DA] text-[#9C9587] rounded-full px-1.5 py-0.5 shrink-0">{count}</span>
                 {confirmingDelete === name ? (
                   <div className="flex items-center gap-1 shrink-0">
-                    <button onClick={() => { onDelete(name); setConfirmingDelete(null); }} className="text-[10px] font-semibold text-red-600 hover:text-red-800 px-1">Yes</button>
+                    <button onClick={() => { onDelete(tab, name); setConfirmingDelete(null); }} className="text-[10px] font-semibold text-red-600 hover:text-red-800 px-1">Yes</button>
                     <button onClick={() => setConfirmingDelete(null)} className="text-[10px] text-[#8A8377] hover:text-[#3F3B34] px-1">No</button>
                   </div>
                 ) : (
@@ -4097,14 +4802,14 @@ function ManageCategoriesModal({ categoryCounts, onRename, onDelete, onAdd, onCl
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addNew(); } }}
-            placeholder="New category name…"
+            placeholder={`New ${active.label.toLowerCase().replace(/s$/, "")}…`}
             className="flex-1 text-[13px] border border-[#E3DDCC] rounded-lg px-3 py-2 outline-none focus:border-[#B9924F]"
           />
           <button onClick={addNew} className="text-[12px] font-medium text-white rounded-lg px-3 py-2 shrink-0" style={{ backgroundColor: "#B9924F" }}>
             Add
           </button>
         </div>
-        <p className="text-[9px] text-[#C1BBAA] px-5 pb-3">Renaming or deleting updates every product using that category.</p>
+        <p className="text-[9px] text-[#C1BBAA] px-5 pb-3">{active.note}</p>
       </div>
     </div>
   );
@@ -4255,14 +4960,6 @@ function ProductSummaryModal({ product: p, mediaIndex, mediaBlobs, onEdit, onClo
         )}
 
         <div className="px-5 py-4 space-y-4">
-          {/* Ingredients List */}
-          {p.additionalInfo && (
-            <div>
-              <p className="text-[9px] font-semibold tracking-wider text-[#8A8377] uppercase mb-1">Ingredients List</p>
-              <p className="text-[12px] text-[#5B564C] leading-relaxed">{p.additionalInfo}</p>
-            </div>
-          )}
-
           {/* Sizes — order: name+vol → Qty On Hand → Qty Available → Wholesale → Retail */}
           {sizes.length > 0 && (
             <div>
@@ -4296,6 +4993,14 @@ function ProductSummaryModal({ product: p, mediaIndex, mediaBlobs, onEdit, onClo
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Ingredients List — last, after product info, sizes, and inventory */}
+          {p.additionalInfo && (
+            <div>
+              <p className="text-[9px] font-semibold tracking-wider text-[#8A8377] uppercase mb-1">Ingredients List</p>
+              <p className="text-[12px] text-[#5B564C] leading-relaxed">{p.additionalInfo}</p>
             </div>
           )}
         </div>
@@ -4433,6 +5138,7 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
   const [rows, setRows] = useState([...products.map(toRow), blankRow(), blankRow(), blankRow()]);
   const [filterBrand, setFilterBrand] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
+  const [sortBy, setSortBy] = useState(""); // "" | "name" | "category"
   const [savedFlash, setSavedFlash] = useState(false);
   const [printPromptOpen, setPrintPromptOpen] = useState(false);
   const [printTimestamp, setPrintTimestamp] = useState(false);
@@ -4471,12 +5177,25 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
   const distinctBrands = [...new Set(products.map((p) => p.brand).filter(Boolean))];
   const distinctCats = [...new Set(products.map((p) => p.category).filter(Boolean))];
 
-  const visibleRows = rows.filter((r) => {
-    if (r.isNew) return true; // new/blank rows always show, regardless of filter
-    if (filterBrand && r.brand !== filterBrand) return false;
-    if (filterCategory && r.category !== filterCategory) return false;
-    return true;
-  });
+  const visibleRows = (() => {
+    const filtered = rows.filter((r) => {
+      if (r.isNew) return true; // new/blank rows always show, regardless of filter
+      if (filterBrand && r.brand !== filterBrand) return false;
+      if (filterCategory && r.category !== filterCategory) return false;
+      return true;
+    });
+    if (!sortBy) return filtered;
+    // Sort only the existing (saved) rows — blank rows for new products stay
+    // put at the end, in the order they were added, so they're easy to find.
+    const existing = filtered.filter((r) => !r.isNew);
+    const blanks = filtered.filter((r) => r.isNew);
+    const sorted = [...existing].sort((a, b) => {
+      const av = (sortBy === "name" ? a.name : a.category) || "";
+      const bv = (sortBy === "name" ? b.name : b.category) || "";
+      return av.localeCompare(bv, undefined, { sensitivity: "base" }) || (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
+    });
+    return [...sorted, ...blanks];
+  })();
 
   const saveAll = () => {
     const newRows = rows.filter((r) => r.isNew && r.name.trim());
@@ -4496,7 +5215,7 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
         sizes: [
           {
             id: Math.random().toString(36).slice(2),
-            sizeType: "size", size: "", sku: "",
+            sizeType: "size", size: "Standard", sku: "",
             wholesale: r.wholesale || "", retail: r.retail || "",
             volumeMl: "", volumeOz: "",
             qtyOnHand: r.qtyOnHand || "", qtyAvailable: "", defaultQty: r.defaultQty || "",
@@ -4517,7 +5236,7 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
           : [
               {
                 id: Math.random().toString(36).slice(2),
-                sizeType: "size", size: "", sku: "",
+                sizeType: "size", size: "Standard", sku: "",
                 wholesale: r.wholesale || "", retail: r.retail || "",
                 volumeMl: "", volumeOz: "",
                 qtyOnHand: r.qtyOnHand || "", qtyAvailable: "", defaultQty: r.defaultQty || "",
@@ -4616,6 +5335,12 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
               Clear
             </button>
           )}
+          <span className="text-[10px] font-bold tracking-wider uppercase text-[#8A8377] ml-3 mr-1">Sort</span>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="text-[12px] border border-[#E3DDCC] rounded-lg px-2 py-1 outline-none focus:border-[#B9924F]">
+            <option value="">Default</option>
+            <option value="name">Name (A–Z)</option>
+            <option value="category">Category</option>
+          </select>
         </div>
 
         <div className="no-print">
@@ -4651,8 +5376,8 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
                 <Combobox value={r.brand} onChange={(v) => updateRow(r.rowId, "brand", v)} options={memory.brand || []} placeholder="Brand" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("brand", v)} />
                 <Combobox value={r.category} onChange={(v) => updateRow(r.rowId, "category", v)} options={memory.category || []} placeholder="Category" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("category", v)} />
                 <input value={r.description} onChange={(e) => updateRow(r.rowId, "description", e.target.value)} className="input input-sm" placeholder="Description" />
-                <input value={r.wholesale} onChange={(e) => updateRow(r.rowId, "wholesale", e.target.value)} className="input input-sm" placeholder="0.00" />
-                <input value={r.retail} onChange={(e) => updateRow(r.rowId, "retail", e.target.value)} className="input input-sm" placeholder="0.00" />
+                <PriceInput value={r.wholesale} onUpdate={(v) => updateRow(r.rowId, "wholesale", v)} className="input input-sm" />
+                <PriceInput value={r.retail} onUpdate={(v) => updateRow(r.rowId, "retail", v)} className="input input-sm" />
                 <input value={r.defaultQty} onChange={(e) => updateRow(r.rowId, "defaultQty", e.target.value)} className="input input-sm" placeholder="0" />
                 <input value={r.qtyOnHand} onChange={(e) => updateRow(r.rowId, "qtyOnHand", e.target.value)} className="input input-sm" placeholder="0" />
                 {r.isNew ? (
@@ -4686,7 +5411,9 @@ function BulkProductModal({ products, memory, onRememberValue, onSaveNew, onSave
 function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, brandCounts, inventorySummary, onInstantUpdate, inventoryHistory, onClose }) {
   const [qtyEdits, setQtyEdits] = useState({});
   const [defEdits, setDefEdits] = useState({});
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyMode, setHistoryMode] = useState(false);
+  const [historyRangePromptOpen, setHistoryRangePromptOpen] = useState(false);
+  const [historyDateFilter, setHistoryDateFilter] = useState(""); // "" | "7d" | "30d" | "90d" | "365d"
   const [search, setSearch] = useState("");
   const [printPromptOpen, setPrintPromptOpen] = useState(false);
   const [printTimestamp, setPrintTimestamp] = useState(false);
@@ -4719,6 +5446,33 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
   const totalValueDef   = rows.reduce((a, r) => a + r.valueDef, 0);
   const totalDiff       = rows.reduce((a, r) => a + r.diff, 0);
   const totalOnHand     = rows.reduce((a, r) => a + parseFloat(r.s.qtyOnHand || 0), 0);
+
+  const HISTORY_RANGE_LABELS = { "": "All time", "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 3 months", "365d": "Last year" };
+  const withinHistoryRange = (ts) => {
+    if (!historyDateFilter) return true;
+    const daysMs = { "7d": 7, "30d": 30, "90d": 90, "365d": 365 }[historyDateFilter] * 86400000;
+    return Date.now() - ts <= daysMs;
+  };
+  const fmtHistoryTs = (ts) => {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  // Only Qty on Hand and Qty Default are tracked for this table's rows — attach
+  // each matching row's own history entries (within the chosen date range) so
+  // they can render as sub-rows directly underneath that row.
+  const rowsHistory = historyMode
+    ? rows.map((r) => ({
+        ...r,
+        historyEntries: (inventoryHistory || [])
+          .filter((e) =>
+            e.productName === r.p.name &&
+            (e.sizeLabel || "—") === (r.s.size || "—") &&
+            (e.field === "Qty on Hand" || e.field === "Default") &&
+            withinHistoryRange(e.ts)
+          )
+          .sort((a, b) => b.ts - a.ts),
+      }))
+    : rows;
 
   // Applying always logs to history — instantInventoryUpdate records the change automatically.
   const applyQtyEdits = () => {
@@ -4785,11 +5539,47 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
           <div className="flex-1" />
           <div className="flex items-center gap-2 shrink-0">
             <button onClick={openPrintPrompt} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">Print</button>
-            <button onClick={() => setHistoryOpen(true)} className="text-[11px] text-[#8A8377] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">History</button>
+            {historyMode && (
+              <button onClick={() => setHistoryRangePromptOpen(true)} className="text-[11px] text-[#B9924F] border border-[#E3DDCC] rounded-lg px-2.5 py-1 hover:bg-[#FAF8F3] transition">
+                {HISTORY_RANGE_LABELS[historyDateFilter]} ▾
+              </button>
+            )}
+            <button
+              onClick={() => (historyMode ? setHistoryMode(false) : setHistoryRangePromptOpen(true))}
+              className={`text-[11px] border rounded-lg px-2.5 py-1 transition ${historyMode ? "text-white border-transparent" : "text-[#8A8377] border-[#E3DDCC] hover:bg-[#FAF8F3]"}`}
+              style={historyMode ? { backgroundColor: "#B9924F" } : {}}
+            >
+              {historyMode ? "Hide History" : "History"}
+            </button>
             <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={18} /></button>
           </div>
         </div>
-        {historyOpen && <InventoryHistoryModal history={inventoryHistory || []} onClose={() => setHistoryOpen(false)} />}
+        {historyRangePromptOpen && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setHistoryRangePromptOpen(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-xs p-5" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-[15px] font-semibold text-[#242320] mb-3">Show History</h3>
+              <p className="text-[12px] text-[#8A8377] mb-3">
+                {search.trim() ? `Showing changes for your current search (${rows.length} match${rows.length !== 1 ? "es" : ""}).` : "Showing changes for all products."}
+              </p>
+              <label className="block text-xs font-medium text-[#8A8377] mb-1.5">Date Range</label>
+              <select value={historyDateFilter} onChange={(e) => setHistoryDateFilter(e.target.value)} className="input mb-4">
+                {Object.entries(HISTORY_RANGE_LABELS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+              </select>
+              <div className="flex gap-2">
+                <button onClick={() => setHistoryRangePromptOpen(false)} className="flex-1 text-[13px] font-medium text-[#5B564C] border border-[#E3DDCC] rounded-full py-2 hover:bg-[#FAF8F3] transition">
+                  Cancel
+                </button>
+                <button
+                  onClick={() => { setHistoryMode(true); setHistoryRangePromptOpen(false); }}
+                  className="flex-1 text-[13px] font-medium text-white rounded-full py-2 transition"
+                  style={{ backgroundColor: "#B9924F" }}
+                >
+                  Show
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {printPromptOpen && (
           <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6" style={{ zIndex: 80 }} onClick={() => setPrintPromptOpen(false)}>
@@ -4841,13 +5631,14 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
               {hdrCell("Qty on Hand", true)}
             </div>
 
-            {rows.length === 0 ? (
+            {rowsHistory.length === 0 ? (
               <p className="text-center text-[12px] text-[#C1BBAA] py-8">No products match.</p>
-            ) : rows.map(({ p, s, si, avail, valueAvail, valueDef, diff, key }) => {
+            ) : rowsHistory.map(({ p, s, si, avail, valueAvail, valueDef, diff, key, historyEntries }) => {
               const hasQtyEdit = qtyEdits[key] !== undefined;
               const hasDefEdit = defEdits[key] !== undefined;
               return (
-                <div key={key} className={`grid items-center px-4 py-2 border-b border-[#F4F1EA] last:border-0 transition-colors ${hasQtyEdit || hasDefEdit ? "bg-[#FEFBF4]" : "hover:bg-[#FAFAF8]"}`} style={{ gridTemplateColumns: col, minWidth: minW }}>
+                <React.Fragment key={key}>
+                <div className={`grid items-center px-4 py-2 border-b border-[#F4F1EA] last:border-0 transition-colors ${hasQtyEdit || hasDefEdit ? "bg-[#FEFBF4]" : "hover:bg-[#FAFAF8]"}`} style={{ gridTemplateColumns: col, minWidth: minW }}>
                   {/* Product */}
                   <div className="min-w-0 pr-1">{si === 0 ? <p className="text-[11px] text-[#242320] truncate" title={p.name}>{p.name}</p> : <p className="text-[10px] text-[#C1BBAA]">↳</p>}</div>
                   {/* Description */}
@@ -4894,6 +5685,45 @@ function InventorySummaryModal({ products, summaryBrands, setSummaryBrands, bran
                     />
                   </div>
                 </div>
+
+                {/* History sub-rows — one per change, the up/down arrow sits directly
+                    under the column it changed (Qty Default or Qty on Hand), with a
+                    small timestamp next to it. Only rendered while History is on. */}
+                {historyMode && (historyEntries || []).map((e) => {
+                  const from = parseFloat(e.from), to = parseFloat(e.to);
+                  const isUp = !isNaN(from) && !isNaN(to) && to > from;
+                  const isDown = !isNaN(from) && !isNaN(to) && to < from;
+                  const arrowColor = isUp ? "text-[#5B8A6E]" : isDown ? "text-[#C9624A]" : "text-[#C1BBAA]";
+                  const arrow = isUp ? "▲" : isDown ? "▼" : "→";
+                  return (
+                    <div key={e.id} className="grid items-center px-4 py-1 border-b border-[#F4F1EA] last:border-0 bg-[#FBF9F4]" style={{ gridTemplateColumns: col, minWidth: minW }}>
+                      <div /><div /><div /><div /><div />
+                      <div />
+                      {/* Qty Default column */}
+                      <div className="flex items-center justify-start gap-1 pl-4">
+                        {e.field === "Default" && (
+                          <>
+                            <span className="text-[8.5px] text-[#C1BBAA] whitespace-nowrap">{fmtHistoryTs(e.ts)}</span>
+                            <span className={`text-[10px] font-semibold ${arrowColor}`}>{arrow}</span>
+                            <span className="text-[10px] text-[#8A8377] tabular-nums whitespace-nowrap">{e.from} → {e.to}</span>
+                          </>
+                        )}
+                      </div>
+                      <div />
+                      {/* Qty on Hand column */}
+                      <div className="flex justify-center items-center gap-1">
+                        {e.field === "Qty on Hand" && (
+                          <>
+                            <span className="text-[8.5px] text-[#C1BBAA] whitespace-nowrap">{fmtHistoryTs(e.ts)}</span>
+                            <span className={`text-[10px] font-semibold ${arrowColor}`}>{arrow}</span>
+                            <span className="text-[10px] text-[#8A8377] tabular-nums whitespace-nowrap">{e.from} → {e.to}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                </React.Fragment>
               );
             })}
 
@@ -5141,21 +5971,44 @@ function legacyCopy(text) {
 function MediaCopyButton({ selected, mediaIndex, mediaBlobs, disabled = false }) {
   const [copyState, setCopyState] = useState(null); // null | "image" | "text"
 
+  // Fetches the image bytes directly (rather than loading via <img crossOrigin>)
+  // and re-hosts them as a local blob: URL before drawing to canvas. This
+  // avoids "tainted canvas" failures with real cross-origin URLs (like
+  // Supabase Storage's public media URLs) — a blob: URL is same-origin as
+  // far as canvas security rules are concerned, regardless of where the
+  // original bytes came from, as long as the fetch itself succeeded.
   const buildPngBlob = async (src) => {
-    const img = await new Promise((resolve, reject) => {
-      const im = new Image();
-      // Only needed for genuine cross-origin http(s) sources — setting it
-      // on data:/blob: URLs can cause unnecessary load failures in some engines.
-      if (/^https?:/.test(src)) im.crossOrigin = "anonymous";
-      im.onload = () => resolve(im);
-      im.onerror = reject;
-      im.src = src;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = img.naturalWidth || img.width;
-    canvas.height = img.naturalHeight || img.height;
-    canvas.getContext("2d").drawImage(img, 0, 0);
-    return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    let loadSrc = src;
+    let objectUrlToRevoke = null;
+    if (/^https?:/.test(src)) {
+      try {
+        const resp = await fetch(src);
+        const rawBlob = await resp.blob();
+        objectUrlToRevoke = URL.createObjectURL(rawBlob);
+        loadSrc = objectUrlToRevoke;
+      } catch (e) {
+        // Fetch failed (network/CORS) — fall back to loading the original
+        // URL directly; this may still taint the canvas, but it's the best
+        // remaining option rather than failing outright.
+      }
+    }
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = loadSrc;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      return await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("toBlob returned null — canvas likely tainted"))), "image/png");
+      });
+    } finally {
+      if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+    }
   };
 
   const handle = async () => {
@@ -5184,6 +6037,24 @@ function MediaCopyButton({ selected, mediaIndex, mediaBlobs, disabled = false })
           // real image clipboard writes (common in non-secure or restricted contexts).
         }
       }
+      // Single link: write both plain-text and an actual HTML anchor tag, so
+      // pasting into rich-text targets (email, docs, Notion, Slack) produces
+      // a real clickable hyperlink rather than just the bare URL as text.
+      if (item?.kind === "link" && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+        const href = ensureProtocol(item.url) || item.url;
+        const label = item.title || href;
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              "text/plain": new Blob([href], { type: "text/plain" }),
+              "text/html": new Blob([`<a href="${href}">${label}</a>`], { type: "text/html" }),
+            }),
+          ]);
+          setCopyState("image"); setTimeout(() => setCopyState(null), 2200); return;
+        } catch (e) {
+          // Falls through to the plain-text copy below.
+        }
+      }
     }
     // Fallback: links copy their URL (the actual, pasteable link); everything
     // else copies title + URL as a text reference.
@@ -5199,8 +6070,16 @@ function MediaCopyButton({ selected, mediaIndex, mediaBlobs, disabled = false })
   };
   return (
     <button type="button" onClick={handle} disabled={disabled} title={copyState === "text" ? "This browser blocked a real image copy — copied as a text reference instead" : undefined}
-      className={`flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide px-2.5 py-1 rounded-lg border transition ${disabled ? "border-[#E3DDCC] text-[#C1BBAA] cursor-not-allowed" : copyState === "image" ? "border-[#5B8A6E] text-[#5B8A6E] bg-[#EBF5EF]" : copyState === "text" ? "border-[#C9A227] text-[#8A6D14] bg-[#FDF7E3]" : "border-[#E3DDCC] text-[#5B564C] hover:bg-[#FAF8F3]"}`}>
-      {copyState ? <Check size={10} /> : <Copy size={10} />} {copyState === "image" ? "Copied!" : copyState === "text" ? "Copied as text" : "Copy"}
+      className="flex items-center justify-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg border transition"
+      style={{
+        width: "96px", textAlign: "center",
+        border: disabled ? "1px solid #E3DDCC" : "1px solid #D8D2C2",
+        backgroundColor: copyState === "image" ? "#EBF5EF" : copyState === "text" ? "#FDF7E3" : "transparent",
+        color: disabled ? "#C1BBAA" : copyState === "image" ? "#5B8A6E" : copyState === "text" ? "#8A6D14" : "#8A8377",
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {copyState ? <Check size={11} /> : <Copy size={11} />} {copyState === "image" ? "Copied!" : copyState === "text" ? "As text" : "Copy"}
     </button>
   );
 }
@@ -5212,8 +6091,15 @@ function SelectDeleteButton({ count, onConfirm, blockedCount = 0, disabled = fal
   return (
     <>
       <button type="button" onClick={() => !disabled && setConfirming(true)} disabled={disabled}
-        className={`flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide px-2.5 py-1 rounded-lg border transition ${disabled ? "border-[#E3DDCC] text-[#C1BBAA] cursor-not-allowed" : "border-red-200 text-red-400 hover:bg-red-50"}`}>
-        <Trash2 size={10} /> Delete
+        className="flex items-center justify-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
+        style={{
+          width: "96px", textAlign: "center",
+          border: disabled ? "1px solid #E3DDCC" : "1px solid #E3C7C2",
+          color: disabled ? "#C1BBAA" : "#C0392B",
+          cursor: disabled ? "not-allowed" : "pointer",
+        }}
+      >
+        <Trash2 size={11} /> Delete
       </button>
       {confirming && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[80]" onClick={() => setConfirming(false)}>
@@ -5234,6 +6120,85 @@ function SelectDeleteButton({ count, onConfirm, blockedCount = 0, disabled = fal
     </>
   );
 }
+
+// Opened via the "Edit" button once one or more existing media items are
+// selected — lets Title/Type/Source be edited for all of them at once.
+// Checking multiple rows and editing Type/Source on one fills it in for
+// every other checked row too — same bulk-fill pattern as Bulk Edit.
+function BulkMediaEditModal({ items, memory, onRememberValue, onUpdateItem, onClose }) {
+  const [rows, setRows] = useState(items.map((it) => ({ id: it.id, title: it.title || "", type: it.type || "", source: it.source || "" })));
+  const [selectedIds, setSelectedIds] = useState(new Set(items.map((it) => it.id))); // all pre-checked, since they were already selected
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const updateRow = (id, field, value) => {
+    const isBulkField = field === "type" || field === "source";
+    const shouldPropagate = isBulkField && selectedIds.has(id) && selectedIds.size > 1;
+    setRows((prev) => prev.map((r) => {
+      if (r.id === id) return { ...r, [field]: value };
+      if (shouldPropagate && selectedIds.has(r.id)) return { ...r, [field]: value };
+      return r;
+    }));
+  };
+
+  const saveAll = () => {
+    rows.forEach((r) => {
+      const original = items.find((it) => it.id === r.id);
+      if (!original) return;
+      if (r.title !== (original.title || "")) onUpdateItem(r.id, "title", r.title);
+      if (r.type !== (original.type || "")) onUpdateItem(r.id, "type", r.type);
+      if (r.source !== (original.source || "")) onUpdateItem(r.id, "source", r.source);
+    });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[80] p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl w-full flex flex-col overflow-hidden" style={{ maxWidth: "680px", maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#EAE5D9] shrink-0">
+          <h3 className="text-[15px] font-semibold text-[#242320]">Edit {items.length} Media Item{items.length !== 1 ? "s" : ""}</h3>
+          <button onClick={onClose} className="text-[#C1BBAA] hover:text-[#242320]"><X size={16} /></button>
+        </div>
+        <p className="text-[10.5px] text-[#8A8377] px-5 pt-3">
+          Check multiple rows, then edit Type or Source on any one of them — that value fills in for every checked row.
+          {selectedIds.size > 1 && <span className="text-[#B9924F] font-medium"> {selectedIds.size} rows checked — bulk-fill is active.</span>}
+        </p>
+        <div className="overflow-y-auto flex-1 px-5 py-3">
+          <div className="grid gap-2 pb-2 text-[9px] font-bold tracking-wider uppercase text-[#8A8377]" style={{ gridTemplateColumns: "20px 1.3fr 1fr 1fr" }}>
+            <input
+              type="checkbox"
+              checked={rows.length > 0 && rows.every((r) => selectedIds.has(r.id))}
+              onChange={(e) => setSelectedIds(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())}
+              title="Select all"
+            />
+            <span>Title</span><span>Type</span><span>Source</span>
+          </div>
+          <div className="space-y-1.5">
+            {rows.map((r) => (
+              <div key={r.id} className={`grid gap-2 items-center rounded-lg p-1 ${selectedIds.has(r.id) ? "bg-[#FBEEDA]" : ""}`} style={{ gridTemplateColumns: "20px 1.3fr 1fr 1fr" }}>
+                <input type="checkbox" checked={selectedIds.has(r.id)} onChange={() => toggleSelected(r.id)} />
+                <input value={r.title} onChange={(e) => updateRow(r.id, "title", e.target.value)} className="input input-sm" placeholder="Title" />
+                <Combobox value={r.type} onChange={(v) => updateRow(r.id, "type", v)} options={memory.type || []} placeholder="Type" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("type", v)} />
+                <Combobox value={r.source} onChange={(v) => updateRow(r.id, "source", v)} options={memory.source || []} placeholder="Source" inputClassName="input input-sm" onAddNew={(v) => onRememberValue("source", v)} />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-[#EAE5D9] shrink-0">
+          <button onClick={onClose} className="text-[13px] font-medium text-[#5B564C] rounded-full px-4 py-2 hover:bg-[#FAF8F3] transition">Cancel</button>
+          <button onClick={saveAll} className="text-[13px] font-medium text-white rounded-full px-4 py-2 transition" style={{ backgroundColor: "#B9924F" }}>Save All</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function LinkCopyButtons({ url, onClose }) {
   const [copied, setCopied] = useState(false);
@@ -5640,6 +6605,7 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
   const [pdfAiItem, setPdfAiItem] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [bulkMediaEditOpen, setBulkMediaEditOpen] = useState(false);
   const [highlightMode, setHighlightMode] = useState(false);
   const [videoPreview, setVideoPreview] = useState(null); // { item, src }
   const blobUrlRef = useRef(null);
@@ -5765,8 +6731,26 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
     setLinkUrl("");
   };
 
+  // Checking multiple staged items and editing Type/Source on one fills it
+  // in for every other checked item too — same bulk-fill pattern used
+  // elsewhere (Bulk Edit, the existing-media bulk edit panel).
+  const [selectedPendingIds, setSelectedPendingIds] = useState(new Set());
+  const togglePendingSelected = (tempId) => {
+    setSelectedPendingIds((prev) => {
+      const next = new Set(prev);
+      next.has(tempId) ? next.delete(tempId) : next.add(tempId);
+      return next;
+    });
+  };
+
   const updatePendingField = (tempId, field, value) => {
-    setPending((prev) => prev.map((p) => (p.tempId === tempId ? { ...p, [field]: value } : p)));
+    const isBulkField = field === "type" || field === "source" || field === "assignProductId";
+    const shouldPropagate = isBulkField && selectedPendingIds.has(tempId) && selectedPendingIds.size > 1;
+    setPending((prev) => prev.map((p) => {
+      if (p.tempId === tempId) return { ...p, [field]: value };
+      if (shouldPropagate && selectedPendingIds.has(p.tempId)) return { ...p, [field]: value };
+      return p;
+    }));
   };
 
   const removePending = (tempId) => setPending((prev) => prev.filter((p) => p.tempId !== tempId));
@@ -5812,114 +6796,38 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
     return true;
   });
 
+  // Highlights are stored globally (so the AI content tool can draw from
+  // items highlighted anywhere), but the on-screen count here must reflect
+  // only THIS product's media — otherwise every product's tab shows the
+  // same "N highlighted" message regardless of where those items live.
+  const productMediaIds = new Set(
+    mediaIndex
+      .filter((m) => m.assignedProductId === draft.id || (draft.images || []).includes(m.id))
+      .map((m) => m.id)
+  );
+  const productHighlightedCount = [...(highlightedIds || new Set())].filter((id) => productMediaIds.has(id)).length;
+
   return (
     <div className="space-y-4">
-      {/* Left: drag-and-drop over paste-a-link, stacked. Right: filters, stacked. */}
-      <div className="grid gap-2.5" style={{ gridTemplateColumns: "1fr 128px" }}>
-        <div className="space-y-2.5">
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current && fileInputRef.current.click()}
-            className={`rounded-lg border border-dashed px-3 py-4 cursor-pointer transition flex flex-col items-center justify-center gap-1 text-center ${
-              dragOver ? "border-[#B9924F] bg-[#FBEEDA]" : "border-[#DDD6C4] bg-[#FAF8F3] hover:border-[#B9924F]"
-            }`}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,.pdf,application/pdf,video/*"
-              className="hidden"
-              onChange={handleBrowse}
-            />
-            <UploadCloud size={15} className="text-[#B9924F]" />
-            <p className="text-[12px] text-[#5B564C] leading-snug">
-              {reading ? "Reading files..." : "Drag & drop, or click to browse"}
-            </p>
-          </div>
-          <div className="rounded-lg border border-[#E3DDCC] px-3 py-4 flex items-center gap-2">
-            <input
-              value={linkUrl}
-              onChange={(e) => setLinkUrl(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLinkToPending(); } }}
-              placeholder="Paste a URL and press Enter"
-              className="input"
-            />
-            <button
-              type="button"
-              onClick={addLinkToPending}
-              className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-white"
-              style={{ backgroundColor: "#B9924F" }}
-            >
-              <Plus size={14} />
-            </button>
-          </div>
-        </div>
-
-        <div className="space-y-1.5">
-          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
-              <Filter size={10} className="text-[#B9924F]" />
-            </div>
-            <select
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value)}
-              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
-            >
-              <option value="">Type</option>
-              {(memory.type || []).map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
-              <Filter size={10} className="text-[#B9924F]" />
-            </div>
-            <select
-              value={filterSource}
-              onChange={(e) => setFilterSource(e.target.value)}
-              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
-            >
-              <option value="">Source</option>
-              {(memory.source || []).map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
-            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
-              <Filter size={10} className="text-[#B9924F]" />
-            </div>
-            <select
-              value={filterDate}
-              onChange={(e) => setFilterDate(e.target.value)}
-              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
-            >
-              <option value="">Date</option>
-              {dateRanges.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </select>
-          </div>
-          <button
-            type="button"
-            onClick={() => { setFilterType(""); setFilterSource(""); setFilterDate(""); }}
-            className="flex rounded-lg overflow-hidden border border-[#E3C7C2] w-full"
-          >
-            <span className="w-1/3 shrink-0 bg-[#F3E1DE] flex items-center justify-center py-1.5">
-              <X size={10} className="text-[#B9604F]" />
-            </span>
-            <span className="w-2/3 bg-[#FCF7F6] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug text-left">
-              Clear Filters
-            </span>
-          </button>
-        </div>
-      </div>
-
       {/* Staging area — nothing here is in the library yet, each item has its own fields */}
       {pending.length > 0 && (
         <div className="p-3 rounded-lg border border-dashed border-[#DDD6C4] bg-[#FAF8F3] space-y-2">
-          <p className="text-[11px] font-semibold text-[#8A8377]">Ready to add ({pending.length}) — fill in each one, then add to library</p>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={pending.length > 0 && pending.every((p) => selectedPendingIds.has(p.tempId))}
+              onChange={(e) => setSelectedPendingIds(e.target.checked ? new Set(pending.map((p) => p.tempId)) : new Set())}
+              title="Select all"
+            />
+            <p className="text-[11px] font-semibold text-[#8A8377]">
+              Ready to add ({pending.length}) — fill in each one, then add to library
+              {selectedPendingIds.size > 1 && <span className="text-[#B9924F] font-medium"> · {selectedPendingIds.size} checked, bulk-fill active for Type/Source</span>}
+            </p>
+          </div>
           <div className="space-y-2">
             {pending.map((p) => (
-              <div key={p.tempId} className="flex items-center gap-2 p-2 rounded-lg bg-white border border-[#E9E4D8]">
+              <div key={p.tempId} className={`flex items-center gap-2 p-2 rounded-lg border ${selectedPendingIds.has(p.tempId) ? "bg-[#FBEEDA] border-[#B9924F]" : "bg-white border-[#E9E4D8]"}`}>
+                <input type="checkbox" checked={selectedPendingIds.has(p.tempId)} onChange={() => togglePendingSelected(p.tempId)} className="shrink-0" />
                 <div style={{ width: "44px", height: "44px" }} className="relative shrink-0 rounded-md overflow-hidden bg-[#F3F1EA] flex items-center justify-center text-[#C1BBAA]">
                   {p.kind === "image" && p.dataUrl ? (
                     <img src={p.dataUrl} alt="pending" className="w-full h-full object-cover" />
@@ -5959,19 +6867,26 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
               </div>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={commitAll}
-            className="text-[12.5px] text-white font-medium rounded-lg px-3.5 py-1.5"
-            style={{ backgroundColor: "#B9924F" }}
-          >
-            Add {pending.length} to library
-          </button>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setPending([])} className="flex-1 text-[12px] font-medium text-[#5B564C] border border-[#E3DDCC] rounded-lg py-1.5 hover:bg-white transition">
+              Cancel
+            </button>
+            <button type="button" onClick={commitAll} className="flex-1 text-[12px] font-medium rounded-lg py-1.5 border transition" style={{ borderColor: "#B9924F", color: "#B9924F" }}>
+              Save
+            </button>
+            <button type="button" onClick={commitAll} className="flex-1 text-[12.5px] text-white font-medium rounded-lg py-1.5" style={{ backgroundColor: "#B9924F" }}>
+              Save and Close
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Committed library — click to preview big, double-click to edit */}
-      <div className="border-t border-[#EAE5D9] pt-3.5">
+      {/* Main working area — thumbnail grid gets the majority of the width (left);
+          upload, paste-link, and filters live in a stacked column on the right,
+          mirroring the global Media Library's layout. */}
+      <div className="flex gap-4 items-start">
+      {/* LEFT: Select/Highlight toolbar + thumbnail grid + inline edit panel */}
+      <div className="flex-1 min-w-0">
         {pickingImages && (
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-[#FBEEDA] border border-[#B9924F] mb-3">
             <p className="text-[12px] text-[#8F6B2E]">
@@ -6022,6 +6937,19 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
             {selectMode && (
               <>
                 <MediaCopyButton selected={selected} mediaIndex={mediaIndex} mediaBlobs={mediaBlobs} disabled={selected.size === 0} />
+                <button
+                  onClick={() => setBulkMediaEditOpen(true)}
+                  disabled={selected.size === 0}
+                  className="flex items-center justify-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-lg transition"
+                  style={{
+                    width: "96px", textAlign: "center",
+                    border: selected.size === 0 ? "1px solid #E3DDCC" : "1px solid #D8D2C2",
+                    color: selected.size === 0 ? "#C1BBAA" : "#8A8377",
+                    cursor: selected.size === 0 ? "not-allowed" : "pointer",
+                  }}
+                >
+                  <Pencil size={11} /> Edit
+                </button>
                 <SelectDeleteButton
                   count={selected.size}
                   disabled={selected.size === 0}
@@ -6040,7 +6968,7 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
         {/* Thumbnails */}
         <div>
           {filteredLibrary.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
+              <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))" }}>
                 {filteredLibrary.map((item) => {
                   const isImage = item.kind === "image";
                   const src = isImage ? mediaBlobs[item.id] || item.url : null;
@@ -6048,11 +6976,11 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
                   const isMultiSelected = selected.has(item.id);
                   const isHighlighted = (highlightedIds || new Set()).has(item.id);
                   const thumbBorderStyle =
-                    editingId === item.id ? { width: "92px", height: "92px", border: "1px solid #B9924F", boxShadow: "0 0 0 1px #B9924F" }
-                    : isMultiSelected ? { width: "92px", height: "92px", border: "2px solid #4B8DB5", boxShadow: "0 0 0 2px rgba(75,141,181,0.35)" }
-                    : isHighlighted ? { width: "92px", height: "92px", border: "2px solid #C0392B", boxShadow: "0 0 0 2px rgba(192,57,43,0.35)" }
-                    : isSelected ? { width: "92px", height: "92px", border: "1px solid #B9924F", boxShadow: "0 0 0 1px #B9924F" }
-                    : { width: "92px", height: "92px", border: "1px solid #E9E4D8" };
+                    editingId === item.id ? { border: "1px solid #B9924F", boxShadow: "0 0 0 1px #B9924F" }
+                    : isMultiSelected ? { border: "2px solid #4B8DB5", boxShadow: "0 0 0 2px rgba(75,141,181,0.35)" }
+                    : isHighlighted ? { border: "2px solid #C0392B", boxShadow: "0 0 0 2px rgba(192,57,43,0.35)" }
+                    : isSelected ? { border: "1px solid #B9924F", boxShadow: "0 0 0 1px #B9924F" }
+                    : { border: "1px solid #E9E4D8" };
                   return (
                     <div
                       key={item.id}
@@ -6105,7 +7033,7 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
                       }}
                       onDoubleClick={() => handleThumbDoubleClick(item.id)}
                       style={thumbBorderStyle}
-                      className="group relative shrink-0 rounded-md overflow-hidden bg-[#F3F1EA] flex items-center justify-center text-[#C1BBAA] cursor-pointer"
+                      className="group relative w-full aspect-square rounded-md overflow-hidden bg-[#F3F1EA] flex items-center justify-center text-[#C1BBAA] cursor-pointer"
                     >
                       {isImage && src ? (
                         <img src={src} alt={item.title || "media"} draggable={false} className="w-full h-full object-cover" />
@@ -6251,6 +7179,104 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
         </div>
       </div>
 
+      {/* RIGHT: drag-and-drop upload, paste-a-link, and filters — stacked, narrower column */}
+      <div className="shrink-0 space-y-2.5" style={{ width: "220px" }}>
+        <div
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current && fileInputRef.current.click()}
+          className={`rounded-lg border border-dashed px-3 py-4 cursor-pointer transition flex flex-col items-center justify-center gap-1 text-center ${
+            dragOver ? "border-[#B9924F] bg-[#FBEEDA]" : "border-[#DDD6C4] bg-[#FAF8F3] hover:border-[#B9924F]"
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.pdf,application/pdf,video/*"
+            className="hidden"
+            onChange={handleBrowse}
+          />
+          <UploadCloud size={15} className="text-[#B9924F]" />
+          <p className="text-[12px] text-[#5B564C] leading-snug">
+            {reading ? "Reading files..." : "Drag & drop, or click to browse"}
+          </p>
+        </div>
+        <div className="rounded-lg border border-[#E3DDCC] px-2.5 py-2.5 flex items-center gap-2">
+          <input
+            value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLinkToPending(); } }}
+            placeholder="Paste a URL…"
+            className="input input-sm"
+          />
+          <button
+            type="button"
+            onClick={addLinkToPending}
+            className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-white"
+            style={{ backgroundColor: "#B9924F" }}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+
+        <div className="space-y-1.5 pt-1 border-t border-[#F0ECE1]">
+          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
+            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
+              <Filter size={10} className="text-[#B9924F]" />
+            </div>
+            <select
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value)}
+              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
+            >
+              <option value="">Type</option>
+              {(memory.type || []).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
+            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
+              <Filter size={10} className="text-[#B9924F]" />
+            </div>
+            <select
+              value={filterSource}
+              onChange={(e) => setFilterSource(e.target.value)}
+              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
+            >
+              <option value="">Source</option>
+              {(memory.source || []).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="flex rounded-lg overflow-hidden border border-[#E3DDCC]">
+            <div className="w-1/3 shrink-0 bg-[#F0EADA] flex items-center justify-center py-1.5">
+              <Filter size={10} className="text-[#B9924F]" />
+            </div>
+            <select
+              value={filterDate}
+              onChange={(e) => setFilterDate(e.target.value)}
+              className="w-2/3 appearance-none bg-[#FAF8F3] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug outline-none cursor-pointer"
+            >
+              <option value="">Date</option>
+              {dateRanges.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setFilterType(""); setFilterSource(""); setFilterDate(""); }}
+            className="flex rounded-lg overflow-hidden border border-[#E3C7C2] w-full"
+          >
+            <span className="w-1/3 shrink-0 bg-[#F3E1DE] flex items-center justify-center py-1.5">
+              <X size={10} className="text-[#B9604F]" />
+            </span>
+            <span className="w-2/3 bg-[#FCF7F6] pl-1.5 pr-1 py-1.5 text-[12px] text-[#5B564C] leading-snug text-left">
+              Clear Filters
+            </span>
+          </button>
+        </div>
+      </div>
+      </div>
+
         {/* Link preview — compact */}
         {linkPreview && (() => {
           const linkedItem = mediaIndex.find((m) => m.id === linkPreview.id);
@@ -6335,11 +7361,11 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
           </div>
         ); })()}
 
-        {/* AI context: highlighted media info */}
-        {(highlightedIds?.size > 0) && (
+        {/* AI context: highlighted media info — scoped to this product's own media */}
+        {productHighlightedCount > 0 && (
           <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-[#FDEEEC] border border-[#C0392B]">
             <span className="text-[11px] text-[#8E241A]">
-              ◈ <strong>{highlightedIds.size}</strong> item{highlightedIds.size > 1 ? "s" : ""} highlighted — AI panels include these as context.
+              ◈ <strong>{productHighlightedCount}</strong> item{productHighlightedCount > 1 ? "s" : ""} highlighted — AI panels include these as context.
             </span>
           </div>
         )}
@@ -6421,6 +7447,15 @@ function MediaTabContent({ mediaIndex, mediaBlobs, memory, onRememberValue, prod
       <p className="text-[11px] text-[#B4AF9F] pt-2 border-t border-[#EAE5D9] leading-relaxed">
         Single Click to Preview - Double Click to Edit
       </p>
+      {bulkMediaEditOpen && selected.size > 0 && (
+        <BulkMediaEditModal
+          items={mediaIndex.filter((m) => selected.has(m.id))}
+          memory={memory}
+          onRememberValue={onRememberValue}
+          onUpdateItem={onUpdateItem}
+          onClose={() => setBulkMediaEditOpen(false)}
+        />
+      )}
     </div>
   );
 }
